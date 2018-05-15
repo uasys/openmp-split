@@ -579,24 +579,24 @@ int32_t __tgt_rtl_data_submit(int32_t device_id, void *tgt_ptr, void *hst_ptr,
 
 int32_t __tgt_rtl_data_submit_async(int32_t device_id, void *tgt_ptr, void *hst_ptr, int64_t size)
 {
-  CUresult err = cuCtxSetCurrent(DeviceInfo.Contexts[device_id]);
-  if (err != CUDA_SUCCESS)
-    {
-      DP("Error when setting CUDA context\n");
-      CUDA_ERR_STRING(err);
-      return OFFLOAD_FAIL;
-    }
+	CUresult err = cuCtxSetCurrent(DeviceInfo.Contexts[device_id]);
+	if (err != CUDA_SUCCESS)
+	{
+		DP("Error when setting CUDA context\n");
+		CUDA_ERR_STRING(err);
+		return OFFLOAD_FAIL;
+	}
         
-  cudaStream_t stream1;
-  cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
-  err = cuMemcpyHtoDAsync((CUdeviceptr)tgt_ptr, hst_ptr, size, stream1);
-  if (err != CUDA_SUCCESS)
-    {
-      DP("Error when copying data from host to device. Pointers: host = " DPxMOD ", device = " DPxMOD ", size = %" PRId64 "\n", DPxPTR(hst_ptr), DPxPTR(tgt_ptr), size);
-      CUDA_ERR_STRING(err);
-      return OFFLOAD_FAIL;
-    }
-  cudaStreamDestroy(stream1);
+	CUstream stream1;
+  	cuStreamCreate(&stream1, CU_STREAM_NON_BLOCKING);
+	err = cuMemcpyHtoDAsync((CUdeviceptr)tgt_ptr, hst_ptr, size, stream1);
+	if (err != CUDA_SUCCESS)
+    	{
+      		DP("Error when copying data from host to device. Pointers: host = " DPxMOD ", device = " DPxMOD ", size = %" PRId64 "\n", DPxPTR(hst_ptr), DPxPTR(tgt_ptr), size);
+      		CUDA_ERR_STRING(err);
+      		return OFFLOAD_FAIL;
+    	}
+  	cudaStreamDestroy(stream1);
   return OFFLOAD_SUCCESS;
 }
 
@@ -610,8 +610,8 @@ int32_t __tgt_rtl_data_retrieve_async(int32_t device_id, void *hst_ptr, void *tg
 		return OFFLOAD_FAIL;
 	}
 	
-	cudaStream_t stream1;
-	cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
+	CUstream stream1;
+	cuStreamCreate(&stream1, CU_STREAM_NON_BLOCKING);
 	err = cuMemcpyDtoHAsync(hst_ptr, (CUdeviceptr)tgt_ptr, size, stream1);
 	if (err != CUDA_SUCCESS)
 	{

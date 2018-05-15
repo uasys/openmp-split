@@ -1835,7 +1835,6 @@ EXTERN void __tgt_target_data_update_nowait(int64_t device_id, int32_t arg_num,
   DP("Entering data update for device %" PRId64 " with %d mappings\n",
       device_id, arg_num);
 
-  printf("Found nowait\n");
   // No devices available?
   if (device_id == OFFLOAD_DEVICE_DEFAULT) {
     device_id = omp_get_default_device();
