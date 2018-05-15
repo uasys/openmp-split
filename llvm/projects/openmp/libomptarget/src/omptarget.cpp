@@ -23,12 +23,13 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <iostream>
 
 // Header file global to this project
 #include "omptarget.h"
 
 #ifdef OMPTARGET_DEBUG
-static int DebugLevel = 0;
+static int DebugLevel = 1;
 
 #define DP(...) \
   do { \
@@ -330,7 +331,7 @@ void RTLsTy::LoadRTLs() {
       continue;
     }
 
-    DP("Successfully loaded library '%s'!\n", Name);
+    DP("Successfully loaded library '%s'!\n", Name); 
 
     // Retrieve the RTL information from the runtime library.
     RTLInfoTy R;
@@ -341,10 +342,9 @@ void RTLsTy::LoadRTLs() {
 #ifdef OMPTARGET_DEBUG
     R.RTLName = Name;
 #endif
-
     if (!(*((void**) &R.is_valid_binary) = dlsym(
               dynlib_handle, "__tgt_rtl_is_valid_binary")))
-      continue;
+      continue;    
     if (!(*((void**) &R.number_of_devices) = dlsym(
               dynlib_handle, "__tgt_rtl_number_of_devices")))
       continue;
@@ -363,8 +363,10 @@ void RTLsTy::LoadRTLs() {
     if (!(*((void**) &R.data_retrieve) = dlsym(
               dynlib_handle, "__tgt_rtl_data_retrieve")))
       continue;
+    DP("WWW4\n");    
     if (!(*((void**) &R.data_submit_async) = dlsym(dynlib_handle, "__tgt_rtl_data_submit_async")))
       continue;
+    DP("WWW5\n");    
     if (!(*((void**) &R.data_retrieve_async) = dlsym(dynlib_handle, "__tgt_rtl_data_retrieve_async")))
       continue;
     if (!(*((void**) &R.data_delete) = dlsym(
@@ -387,6 +389,7 @@ void RTLsTy::LoadRTLs() {
         R.RTLName.c_str(), R.NumberOfDevices);
 
     // The RTL is valid! Will save the information in the RTLs list.
+
     AllRTLs.push_back(R);
   }
 
@@ -1121,10 +1124,11 @@ EXTERN void __tgt_register_lib(__tgt_bin_desc *desc) {
     __tgt_device_image *img = &desc->DeviceImages[i];
 
     RTLInfoTy *FoundRTL = NULL;
-
+    DP("For Device %d, registering RTL image.\n", i);
     // Scan the RTLs that have associated images until we find one that supports
     // the current image.
     for (auto &R : RTLs.AllRTLs) {
+      DP("WWW");
       if (!R.is_valid_binary(img)) {
         DP("Image " DPxMOD " is NOT compatible with RTL %s!\n",
             DPxPTR(img->ImageStart), R.RTLName.c_str());

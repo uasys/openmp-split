@@ -20,7 +20,7 @@
 
 #define OFFLOAD_SUCCESS (0)
 #define OFFLOAD_FAIL (~0)
-
+//#define OMPTARGET_DEBUG            1
 #define OFFLOAD_DEVICE_DEFAULT     -1
 #define HOST_DEVICE                -10
 
