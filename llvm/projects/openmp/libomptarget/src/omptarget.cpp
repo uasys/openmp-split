@@ -177,9 +177,6 @@ struct DeviceTy {
   int32_t data_submit(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
   int32_t data_retrieve(void *HstPtrBegin, void *TgtPtrBegin, int64_t Size);
 
-  int32_t data_submit_async(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
-  int32_t data_retrieve_async(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
-
   int32_t run_region(void *TgtEntryPtr, void **TgtVarsPtr,
       ptrdiff_t *TgtOffsets, int32_t TgtVarsSize);
   int32_t run_team_region(void *TgtEntryPtr, void **TgtVarsPtr,
@@ -202,9 +199,7 @@ struct RTLInfoTy {
   typedef __tgt_target_table *(load_binary_ty)(int32_t, void *);
   typedef void *(data_alloc_ty)(int32_t, int64_t, void *);
   typedef int32_t(data_submit_ty)(int32_t, void *, void *, int64_t);
-  typedef int32_t(data_retrieve_ty)(int32_t, void *, void *, int64_t)i;
-  typedef int32_t(data_submit_async_ty)(int32_t,void *, void *, int64_t);
-  typedef int32_t(data_retrieve_async_ty)(int32_t,void *, void *, int64_t);
+  typedef int32_t(data_retrieve_ty)(int32_t, void *, void *, int64_t);
   typedef int32_t(data_delete_ty)(int32_t, void *);
   typedef int32_t(run_region_ty)(int32_t, void *, void **, ptrdiff_t *,
                                  int32_t);
@@ -232,8 +227,6 @@ struct RTLInfoTy {
   data_alloc_ty *data_alloc;
   data_submit_ty *data_submit;
   data_retrieve_ty *data_retrieve;
-  data_submit_async_ty *data_submit_async;
-  data_retieve_async_ty *data_retrieve_async;
   data_delete_ty *data_delete;
   run_region_ty *run_region;
   run_team_region_ty *run_team_region;
@@ -254,7 +247,7 @@ struct RTLInfoTy {
         RTLName(),
 #endif
         is_valid_binary(0), number_of_devices(0), init_device(0),
-        load_binary(0), data_alloc(0), data_submit(0), data_retrieve(0), data_submit_async(0), data_retrieve_async(0),
+        load_binary(0), data_alloc(0), data_submit(0), data_retrieve(0),
         data_delete(0), run_region(0), run_team_region(0), isUsed(false),
         Mtx() {}
 
@@ -273,8 +266,6 @@ struct RTLInfoTy {
     data_alloc = r.data_alloc;
     data_submit = r.data_submit;
     data_retrieve = r.data_retrieve;
-    data_submit_async = r.data_submit_async;
-    data_retrieve_async = r.data_retrieve_async;
     data_delete = r.data_delete;
     run_region = r.run_region;
     run_team_region = r.run_team_region;
@@ -364,10 +355,6 @@ void RTLsTy::LoadRTLs() {
       continue;
     if (!(*((void**) &R.data_retrieve) = dlsym(
               dynlib_handle, "__tgt_rtl_data_retrieve")))
-      continue;
-    if (!(*((void**) &R.data_submit_async) = dlsym(dynlib_handle, "__tgt_rtl_data_submit_async")))
-      continue;
-    if (!(*((void**) &R.data_retrieve_async) = dlsym(dynlib_handle, "__tgt_rtl_data_retrieve_async")))
       continue;
     if (!(*((void**) &R.data_delete) = dlsym(
               dynlib_handle, "__tgt_rtl_data_delete")))
@@ -1027,14 +1014,6 @@ int32_t DeviceTy::data_submit(void *TgtPtrBegin, void *HstPtrBegin,
 int32_t DeviceTy::data_retrieve(void *HstPtrBegin, void *TgtPtrBegin,
     int64_t Size) {
   return RTL->data_retrieve(RTLDeviceID, HstPtrBegin, TgtPtrBegin, Size);
-}
-
-int32_t DeviceTy::data_submit_async(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size) {
-  return RTL->data_submit_async(RTLDeviceID, TgtPtrBegin, HstPtrBegin, Size);
-}
-
-int32_t DeviceTy::data_retrieve_async(void *HstPtrBegin, void *TgtPtrBegin, int64_t Size) {
-  return RTL->data_retrieve_async(RTLDeviceID, HstPtrBegin, TgtPtrBegin, Size);
 }
 
 // Run region on device
@@ -1830,82 +1809,9 @@ EXTERN void __tgt_target_data_end(int64_t device_id, int32_t arg_num,
 
 EXTERN void __tgt_target_data_update_nowait(int64_t device_id, int32_t arg_num,
     void **args_base, void **args, int64_t *arg_sizes, int64_t *arg_types) {
-  DP("Entering data update for device %" PRId64 " with %d mappings\n",
-      device_id, arg_num);
-
-  // No devices available?
-  if (device_id == OFFLOAD_DEVICE_DEFAULT) {
-    device_id = omp_get_default_device();
-  }
-
-  if (CheckDevice(device_id) != OFFLOAD_SUCCESS) {
-    DP("Failed to get device %" PRId64 " ready\n", device_id);
-    return;
-  }
-
-  DeviceTy& Device = Devices[device_id];
-
-  // process each input.
-  for (int32_t i = 0; i < arg_num; ++i) {
-    if ((arg_types[i] & OMP_TGT_MAPTYPE_LITERAL) ||
-        (arg_types[i] & OMP_TGT_MAPTYPE_PRIVATE))
-      continue;
-
-    void *HstPtrBegin = args[i];
-    int64_t MapSize = arg_sizes[i];
-    bool IsLast;
-    void *TgtPtrBegin = Device.getTgtPtrBegin(HstPtrBegin, MapSize, IsLast,
-        false);
-
-    if (arg_types[i] & OMP_TGT_MAPTYPE_FROM) {
-      DP("Moving %" PRId64 " bytes (tgt:" DPxMOD ") -> (hst:" DPxMOD ")\n",
-          arg_sizes[i], DPxPTR(TgtPtrBegin), DPxPTR(HstPtrBegin));
-      Device.data_retrieve_async(HstPtrBegin, TgtPtrBegin, MapSize);
-
-      uintptr_t lb = (uintptr_t) HstPtrBegin;
-      uintptr_t ub = (uintptr_t) HstPtrBegin + MapSize;
-      Device.ShadowMtx.lock();
-      for (ShadowPtrListTy::iterator it = Device.ShadowPtrMap.begin();
-          it != Device.ShadowPtrMap.end(); ++it) {
-       void **ShadowHstPtrAddr = (void**) it->first; 
-        if ((uintptr_t) ShadowHstPtrAddr < lb)
-          continue;
-        if ((uintptr_t) ShadowHstPtrAddr >= ub)
-          break;
-        DP("Restoring original host pointer value " DPxMOD " for host pointer "
-            DPxMOD "\n", DPxPTR(it->second.HstPtrVal),
-            DPxPTR(ShadowHstPtrAddr));
-        *ShadowHstPtrAddr = it->second.HstPtrVal;
-      }
-      Device.ShadowMtx.unlock();
-    }
-
-    if (arg_types[i] & OMP_TGT_MAPTYPE_TO) {
-      DP("Moving %" PRId64 " bytes (hst:" DPxMOD ") -> (tgt:" DPxMOD ")\n",
-          arg_sizes[i], DPxPTR(HstPtrBegin), DPxPTR(TgtPtrBegin));
-      Device.data_submit_async(TgtPtrBegin, HstPtrBegin, MapSize);
-
-      uintptr_t lb = (uintptr_t) HstPtrBegin;
-      uintptr_t ub = (uintptr_t) HstPtrBegin + MapSize;
-      Device.ShadowMtx.lock();
-      for (ShadowPtrListTy::iterator it = Device.ShadowPtrMap.begin();
-          it != Device.ShadowPtrMap.end(); ++it) {
-        void **ShadowHstPtrAddr = (void**) it->first;
-        if ((uintptr_t) ShadowHstPtrAddr < lb)
-          continue;
-        if ((uintptr_t) ShadowHstPtrAddr >= ub)
-          break;
-        DP("Restoring original target pointer value " DPxMOD " for target "
-            "pointer " DPxMOD "\n", DPxPTR(it->second.TgtPtrVal),
-            DPxPTR(it->second.TgtPtrAddr));
-        Device.data_submit(it->second.TgtPtrAddr,
-            &it->second.TgtPtrVal, sizeof(void *));
-      }
-      Device.ShadowMtx.unlock();
-    }
-  }
   // Async not yet implemented, just call the blocking version
-//  __tgt_target_data_update(device_id, arg_num, args_base, args, arg_sizes,arg_types);
+  __tgt_target_data_update(device_id, arg_num, args_base, args, arg_sizes,
+      arg_types);
 }
 
 EXTERN void __tgt_target_data_update_depend(int64_t device_id, int32_t arg_num,
@@ -1927,7 +1833,7 @@ EXTERN void __tgt_target_data_update_nowait_depend(int64_t device_id,
     __kmpc_omp_taskwait(NULL, 0);
 
   // Async not yet implemented, just call the blocking version
-  __tgt_target_data_update_nowait(device_id, arg_num, args_base, args, arg_sizes,
+  __tgt_target_data_update(device_id, arg_num, args_base, args, arg_sizes,
                           arg_types);
 }
 
@@ -2078,7 +1984,7 @@ static int target(int64_t device_id, void *host_ptr, int32_t arg_num,
 
   if (rc != OFFLOAD_SUCCESS) {
     DP("Call to target_data_begin failed, skipping target execution.\n");
-    // Call tariet_data_end to dealloc whatever target_data_begin allocated
+    // Call target_data_end to dealloc whatever target_data_begin allocated
     // and return OFFLOAD_FAIL.
     target_data_end(Device, arg_num, args_base, args, arg_sizes, arg_types);
     return OFFLOAD_FAIL;
@@ -2341,4 +2247,3 @@ EXTERN void __kmpc_kernel_print(char *title) { DP(" %s\n", title); }
 EXTERN void __kmpc_kernel_print_int8(char *title, int64_t data) {
   DP(" %s val=%" PRId64 "\n", title, data);
 }
-
