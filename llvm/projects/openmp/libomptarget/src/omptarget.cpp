@@ -176,10 +176,8 @@ struct DeviceTy {
 
   int32_t data_submit(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
   int32_t data_retrieve(void *HstPtrBegin, void *TgtPtrBegin, int64_t Size);
-
   int32_t data_submit_async(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
-  int32_t data_retrieve_async(void *TgtPtrBegin, void *HstPtrBegin, int64_t Size);
-
+  int32_t data_retrieve_async(void *HstPtrBegin, void *TgtPtrBegin, int64_t Size);
   int32_t run_region(void *TgtEntryPtr, void **TgtVarsPtr,
       ptrdiff_t *TgtOffsets, int32_t TgtVarsSize);
   int32_t run_team_region(void *TgtEntryPtr, void **TgtVarsPtr,
@@ -1833,6 +1831,7 @@ EXTERN void __tgt_target_data_update_nowait(int64_t device_id, int32_t arg_num,
   DP("Entering data update for device %" PRId64 " with %d mappings\n",
       device_id, arg_num);
 
+  printf("Found nowait\n");
   // No devices available?
   if (device_id == OFFLOAD_DEVICE_DEFAULT) {
     device_id = omp_get_default_device();
@@ -2078,7 +2077,7 @@ static int target(int64_t device_id, void *host_ptr, int32_t arg_num,
 
   if (rc != OFFLOAD_SUCCESS) {
     DP("Call to target_data_begin failed, skipping target execution.\n");
-    // Call tariet_data_end to dealloc whatever target_data_begin allocated
+    // Call target_data_end to dealloc whatever target_data_begin allocated
     // and return OFFLOAD_FAIL.
     target_data_end(Device, arg_num, args_base, args, arg_sizes, arg_types);
     return OFFLOAD_FAIL;

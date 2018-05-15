@@ -68,7 +68,7 @@ int32_t __tgt_rtl_data_submit_async(int32_t ID, void *TargetPtr, void *HostPtr, 
 int32_t __tgt_rtl_data_retrieve(int32_t ID, void *HostPtr, void *TargetPtr,
                                 int64_t Size);
 
-int32_t __tgt_rtl_data_retrieve_async(int32_t ID, void *TargetPtr, void *HostPtr, int64_t Size);
+int32_t __tgt_rtl_data_retrieve_async(int32_t ID, void *HostPtr, void *TargetPtr, int64_t Size);
 
 // De-allocate the data referenced by target ptr on the device. In case of
 // success, return zero. Otherwise, return an error code.
