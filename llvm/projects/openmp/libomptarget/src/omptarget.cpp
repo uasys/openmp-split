@@ -202,7 +202,7 @@ struct RTLInfoTy {
   typedef __tgt_target_table *(load_binary_ty)(int32_t, void *);
   typedef void *(data_alloc_ty)(int32_t, int64_t, void *);
   typedef int32_t(data_submit_ty)(int32_t, void *, void *, int64_t);
-  typedef int32_t(data_retrieve_ty)(int32_t, void *, void *, int64_t)i;
+  typedef int32_t(data_retrieve_ty)(int32_t, void *, void *, int64_t);
   typedef int32_t(data_submit_async_ty)(int32_t,void *, void *, int64_t);
   typedef int32_t(data_retrieve_async_ty)(int32_t,void *, void *, int64_t);
   typedef int32_t(data_delete_ty)(int32_t, void *);
@@ -233,7 +233,7 @@ struct RTLInfoTy {
   data_submit_ty *data_submit;
   data_retrieve_ty *data_retrieve;
   data_submit_async_ty *data_submit_async;
-  data_retieve_async_ty *data_retrieve_async;
+  data_retrieve_async_ty *data_retrieve_async;
   data_delete_ty *data_delete;
   run_region_ty *run_region;
   run_team_region_ty *run_team_region;
