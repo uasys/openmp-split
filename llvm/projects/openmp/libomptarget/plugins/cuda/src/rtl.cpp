@@ -577,6 +577,52 @@ int32_t __tgt_rtl_data_submit(int32_t device_id, void *tgt_ptr, void *hst_ptr,
   return OFFLOAD_SUCCESS;
 }
 
+int32_t __tgt_rtl_data_submit_async(int32_t device_id, void *tgt_ptr, void *hst_ptr, int64_t size)
+{
+	CUresult err = cuCtxSetCurrent(DeviceInfo.Contexts[device_id]);
+	if (err != CUDA_SUCCESS)
+	{
+		DP("Error when setting CUDA context\n");
+		CUDA_ERR_STRING(err);
+		return OFFLOAD_FAIL;
+	}
+        
+        cudaStream_t stream1;
+        cudaStreamCreateWithFlags(&stream1,cudaStreamNonBlocking);
+	err = cuMemcpyHtoDAsync((CUdeviceptr)tgt_ptr, hst_ptr, size, stream1);
+	if (err != CUDA_SUCCESS)
+	{
+		DP("Error when copying data from host to device. Pointers: host = " DPxMOD ", device = " DPxMOD ", size = %" PRId64 "\n", DPxPTR(hst_ptr), DPxPTR(tgt_ptr), size);
+		CUDA_ERR_STRING(err);
+		return OFFLOAD_FAIL;
+	}
+        cudaStreamDestroy(stream1);
+	return OFFLOAD_SUCCESS;
+}
+
+int32_t __tgt_rtl_data_retrieve_async(int32_t device_id, void *hst_ptr, void *tgt_ptr, int64_t size)
+{
+	CUresult err = cuCtxSetCurrent(DeviceInfo.Contexts[device_id]);
+	if (err != CUDA_SUCCESS)
+	{
+		DP("Error when setting CUDA context\n");
+		CUDA_ERR_STRING(err);
+		return OFFLOAD_FAIL;
+	}
+	
+	cudaStream_t stream1;
+	cudaStreamCreateWithFlags(&stream1, cudaStreamNonBlocking);
+	err = cuMemcpyDtoHAsync(hst_ptr, (CUdeviceptr)tgt_ptr, size, stream1);
+	if (err != CUDA_SUCCESS)
+	{
+		DP("Error when copying data from device to host. Pointers: host = " DPxMOD ", device = " DPxMOD ", size = %" PRId64 "\n", DPxPTR(hst_ptr), DPxPTR(tgt_ptr), size);
+		CUDA_ERR_STRING(err);
+		return OFFLOAD_FAIL;
+	}
+	cudaStreamDestroy(stream1);
+	return OFFLOAD_SUCCESS;
+}
+
 int32_t __tgt_rtl_data_retrieve(int32_t device_id, void *hst_ptr, void *tgt_ptr,
     int64_t size) {
   // Set the context we are using.
@@ -586,7 +632,7 @@ int32_t __tgt_rtl_data_retrieve(int32_t device_id, void *hst_ptr, void *tgt_ptr,
     CUDA_ERR_STRING(err);
     return OFFLOAD_FAIL;
   }
-
+  
   err = cuMemcpyDtoH(hst_ptr, (CUdeviceptr)tgt_ptr, size);
   if (err != CUDA_SUCCESS) {
     DP("Error when copying data from device to host. Pointers: host = " DPxMOD
