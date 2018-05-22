@@ -674,13 +674,6 @@ int32_t __tgt_rtl_run_target_team_region(int32_t device_id, void *tgt_entry_ptr,
     return OFFLOAD_FAIL;
   }
 
-  int nowait = 0;
-  if(thread_limit < 0)
-  {
-	nowait = 1;
-	thread_limit = -thread_limit;
-  }
-
   // All args are references.
   // Allocate one more pointer for the reduction scratchpad.
   std::vector<void *> args(arg_num + 1);
@@ -788,16 +781,7 @@ int32_t __tgt_rtl_run_target_team_region(int32_t device_id, void *tgt_entry_ptr,
   // Run on the device.
   DP("Launch kernel with %d blocks and %d threads\n", cudaBlocksPerGrid,
      cudaThreadsPerBlock);
-
-  if(nowait > 0)
-  { 
-	CUstream stream1;
-	cuStreamCreate(&stream1, CU_STREAM_NON_BLOCKING);
-	err = cuLaunchKernel(KernelInfo->Func, cudaBlocksPerGrid, 1, 1, cudaThreadsPerBlock, 1, 1, 0, stream1, &args[0], 0);
-	cudaStreamDestroy(stream1);
-  }
-  else
- 	err = cuLaunchKernel(KernelInfo->Func, cudaBlocksPerGrid, 1, 1, cudaThreadsPerBlock, 1, 1, 0 /*bytes of shared memory*/, 0, &args[0], 0);
+  err = cuLaunchKernel(KernelInfo->Func, cudaBlocksPerGrid, 1, 1, cudaThreadsPerBlock, 1, 1, 0 /*bytes of shared memory*/, 0, &args[0], 0);
   if (err != CUDA_SUCCESS) {
     DP("Device kernel launch failed!\n");
     CUDA_ERR_STRING(err);

@@ -2295,7 +2295,7 @@ EXTERN int __tgt_target_teams_nowait(int64_t device_id, void *host_ptr,
     int64_t *arg_types, int32_t team_num, int32_t thread_limit) {
 
   return __tgt_target_teams(device_id, host_ptr, arg_num, args_base, args,
-                            arg_sizes, arg_types, team_num, -thread_limit);
+                            arg_sizes, arg_types, team_num, thread_limit);
 }
 
 
