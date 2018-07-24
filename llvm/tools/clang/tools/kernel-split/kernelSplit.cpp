@@ -15,8 +15,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/CommandLine.h"
 
-#include <sstream>
-#include <string>
 #include <iostream>
 
 using namespace clang;
@@ -33,13 +31,22 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
        
         bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d)
         {
-            rewriter.InsertText(d->getLocStart().getLocWithOffset(-8), "// Target Teams Statement\n", true, true);
+            
+            SourceLocation firstClause = d->clauses()[0]->getLocStart();
+            for(int i = 0; i < (int) d->getNumClauses(); ++i)
+            {
+                OMPClause *c = d->clauses()[i];
+                if(c->getClauseKind() != OMPC_map)
+                    rewriter.RemoveText(SourceRange(c->getLocStart(),c->getLocEnd()));
+            }
+            rewriter.ReplaceText(SourceRange(d->getLocStart(),firstClause.getLocWithOffset(-1)), "omp target data");
             return true;
         }
 
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d)
         {
-            rewriter.InsertText(d->getLocStart().getLocWithOffset(-8), "// Distribute Parallel For Directive\n", true, true);
+            rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
+            rewriter.InsertText(d->getLocEnd(), " thread_limit(128)");
             return true;
         }
 };
@@ -54,7 +61,6 @@ class MyASTConsumer : public ASTConsumer {
         bool HandleTopLevelDecl(DeclGroupRef DR) override {
             for(DeclGroupRef::iterator b = DR.begin(), e = DR.end(); b !=e; ++b) {
                 visitor.TraverseDecl(*b);
-         //       (*b)->dump();
             }
             return true;
         }
