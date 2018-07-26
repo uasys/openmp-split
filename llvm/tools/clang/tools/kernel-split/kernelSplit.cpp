@@ -17,81 +17,68 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/CommandLine.h"
 
+#include <string>
+#include <sstream>
 #include <iostream>
 #include <iterator>
 
+using namespace llvm;
 using namespace clang;
 using namespace clang::driver;
 using namespace clang::tooling;
-using namespace llvm;
 
 class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
     private:
         Rewriter &rewriter;
         ASTContext &context;
-        SourceLocation targetRange;
-        SourceLocation distributeRange;
+        std::stringstream targetClauses;
+        bool inTarget = false;
+        bool firstParallel = false;
 
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
-        
-        bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d)
-        {
-            bool clauses = false;
-            for(int i = 0; i < (int) d->getNumClauses(); ++i)
-            {
+
+        bool TraverseOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
+            inTarget = false;
+            return true;
+        }
+
+        bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+            SourceLocation start = d->getLocStart();
+            SourceLocation end = d->getLocEnd();
+ 
+            targetClauses.str("");
+            for(int i = 0; i < (int) d->getNumClauses(); ++i) {
                 OMPClause *c = d->clauses()[i];
-                if(!c->isImplicit())
-                {
-                    clauses = true;
-                    if(c->getClauseKind() != OMPC_map)
+                if(!c->isImplicit() and c->getClauseKind() != OMPC_map) {
+                        if(i == 0)
+                            end = d->clauses()[0]->getLocStart().getLocWithOffset(-1);
+                        targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),c->getLocEnd()));
                         rewriter.RemoveText(SourceRange(c->getLocStart(),c->getLocEnd()));
                 }
             }
 
-            if(clauses)
-                rewriter.ReplaceText(SourceRange(d->getLocStart(),d->clauses()[0]->getLocStart().getLocWithOffset(-1)), "omp target data");
-            else
-                rewriter.ReplaceText(SourceRange(d->getLocStart(),d->getLocEnd()),"omp target data");
-
-
-            const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
-            bool next = false;
-            for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end(); iter++)
-            {
-                if(next)
-                {
-                    targetRange = iter->getLocStart().getLocWithOffset(-1);
-                    break;
-                }     
-                if(iter->getLocStart() == d->getLocStart())
-                    next = true;    
-            }
-
+            rewriter.ReplaceText(SourceRange(start,end),"omp target data");
+            inTarget = true;
             return true;
         }
 
-        bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d)
-        {
-            if(rewriter.getSourceMgr().isBeforeInTranslationUnit(d->getLocStart(),targetRange))
+        bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
+            if(!firstParallel)
             {
-                rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
-                rewriter.InsertText(d->getLocEnd(), " thread_limit(128)");
-
                 const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
-                bool next = false;
-                for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end(); iter++)
+                for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end();iter++)
                 {
-                    std::cout << iter->getStmtClassName() << std::endl;
-                    if(next)
-                    {
-                        distributeRange = iter->getLocStart().getLocWithOffset(-1);
-                        break;
-                    }     
-                    if(iter->getLocStart() == d->getLocStart())
-                        next = true;    
+                    std::cout >> iter->getStmtClassName() << std::endl;
                 }
             }
+            if(inTarget) {
+                rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
+                rewriter.InsertText(d->getLocEnd()," " + targetClauses.str());
+            }
+            if(inTarget)
+                inParallel = true;
             return true;
         }
 };
@@ -106,6 +93,7 @@ class MyASTConsumer : public ASTConsumer {
         bool HandleTopLevelDecl(DeclGroupRef DR) override {
             for(DeclGroupRef::iterator b = DR.begin(), e = DR.end(); b !=e; ++b) {
                 visitor.TraverseDecl(*b);
+                (*b)->dump();
             }
             return true;
         }
