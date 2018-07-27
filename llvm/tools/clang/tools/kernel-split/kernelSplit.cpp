@@ -38,9 +38,12 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         bool inTarget = false;
         bool firstParallel = false;
         bool findEnd = false;
-        SourceLocation end;
+        SourceLocation endLoc;
         int numParallel;
         int curParallel;
+        bool findParallelDepth = false;
+        int stmtDepth;
+        int parallelDepth;
 
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
@@ -69,28 +72,42 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         }
         
         void addRightBrkt(Stmt *s) {
-            end = s->getLocEnd();
+            endLoc = s->getLocEnd();
             findEnd = true;
             RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(s);
             findEnd = false;
-            rewriter.InsertText(end.getLocWithOffset(1), "}");
+            rewriter.InsertText(endLoc.getLocWithOffset(1), "}");
             return;
         }
  
         bool VisitStmt(Stmt *s) {
-            if(findEnd and rewriter.getSourceMgr().isBeforeInTranslationUnit(end,s->getLocEnd()))
-                end = s->getLocEnd();
+            if(findEnd and rewriter.getSourceMgr().isBeforeInTranslationUnit(endLoc,s->getLocEnd()))
+                endLoc = s->getLocEnd();
             return true;
         }
         
         bool TraverseOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+            stmtDepth = 0;
+            parallelDepth = -1;
+            findParallelDepth = true;
+            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
+            findParallelDepth = false;
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
             inTarget = false;
             firstParallel = false;
             return true;
         }
 
+        bool TraverseStmt(Stmt *s, DataRecursionQueue *Queue=nullptr) {
+            stmtDepth++;
+            RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(s,Queue);
+            stmtDepth--;
+            return true;
+        }
+ 
         bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+            if(findParallelDepth)
+                return true;
             numParallel = 0;
             curParallel = 0;
             targetClauses.str("");
@@ -116,22 +133,50 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         }
 
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
-            if(inTarget)
-            {
-               if(!firstParallel) { 
+            std::cout << stmtDepth << std::endl;
+            if(findParallelDepth and (stmtDepth < parallelDepth or parallelDepth == -1))
+                parallelDepth = stmtDepth;
+            else if(inTarget and !findEnd and stmtDepth == parallelDepth) {
+               curParallel++;
+               if(!firstParallel) {
                    firstParallel = true;
                    rewriter.InsertText(d->getLocStart().getLocWithOffset(-8), "#pragma omp target data " + mapClauses.str() + "{\n", true, true);
                    const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
+                   int i = 0, fp = -1, lp = -1;
                    for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end();iter++) {
-                       if(isa<OMPDistributeParallelForDirective>(*iter))
+                       if(isa<OMPDistributeParallelForDirective>(*iter)) {
                            numParallel++;
+                           if(fp == -1)
+                               fp = i;
+                           lp = i;
+                       }
+                       i++;
                    }
+
+                   bool previousSerial = false;
+                   bool previousParallel = false;
+                   i = 0;
+                   for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end(); iter++) {  
+                       if(isa<OMPDistributeParallelForDirective>(*iter)) {
+                           if(previousSerial and fp != i)
+                               rewriter.InsertText(iter->getLocStart().getLocWithOffset(-8), "}\n", true, true);
+                           previousParallel = true;
+                           previousSerial = false;
+                       }
+                       else {
+                           if(previousParallel and lp > i)
+                               rewriter.InsertText(iter->getLocStart(), "#pragma omp target teams {\n" + targetClauses.str(), true, true);
+                           previousParallel = false;
+                           previousSerial = true;
+                       }
+                   i++;
+                   }
+                   
                }
-               curParallel++;
                if(numParallel == curParallel)
                    addRightBrkt(d);
-                rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
-                rewriter.InsertText(d->getLocEnd()," " + targetClauses.str());
+               rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
+               rewriter.InsertText(d->getLocEnd()," " + targetClauses.str());
             }
             return true;
         }
