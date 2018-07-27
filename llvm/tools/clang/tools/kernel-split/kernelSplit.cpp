@@ -11,6 +11,8 @@
 #include "clang/Frontend/FrontendActions.h"
 
 #include "clang/Rewrite/Core/Rewriter.h"
+#include "clang/Basic/TokenKinds.h"
+#include "clang/Lex/Lexer.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 
@@ -32,53 +34,105 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         Rewriter &rewriter;
         ASTContext &context;
         std::stringstream targetClauses;
+        std::stringstream mapClauses;
         bool inTarget = false;
         bool firstParallel = false;
+        bool findEnd = false;
+        SourceLocation end;
+        int numParallel;
+        int curParallel;
 
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
 
+        void removeRightBrkt(SourceLocation loc) {
+            int lefts = 0;
+            SourceLocation tokLoc;
+            Token currTok;
+            while(true) {
+                tokLoc = Lexer::GetBeginningOfToken(loc,rewriter.getSourceMgr(), rewriter.getLangOpts());
+                bool noToken = Lexer::getRawToken(tokLoc, currTok, rewriter.getSourceMgr(), rewriter.getLangOpts()); 
+                loc = loc.getLocWithOffset(1);
+                if(!noToken) {
+                    if (currTok.getKind() == tok::l_brace)
+                        lefts++;
+                    else if (currTok.getKind() == tok::r_brace) {
+                        if(lefts != 0)
+                            lefts--;
+                        else
+                            break;
+                    }
+                }
+            }
+            rewriter.RemoveText(SourceRange(tokLoc,loc));
+            return;
+        }
+        
+        void addRightBrkt(Stmt *s) {
+            end = s->getLocEnd();
+            findEnd = true;
+            RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(s);
+            findEnd = false;
+            rewriter.InsertText(end.getLocWithOffset(1), "}");
+            return;
+        }
+ 
+        bool VisitStmt(Stmt *s) {
+            if(findEnd and rewriter.getSourceMgr().isBeforeInTranslationUnit(end,s->getLocEnd()))
+                end = s->getLocEnd();
+            return true;
+        }
+        
         bool TraverseOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
             inTarget = false;
+            firstParallel = false;
             return true;
         }
 
         bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
-            SourceLocation start = d->getLocStart();
-            SourceLocation end = d->getLocEnd();
- 
+            numParallel = 0;
+            curParallel = 0;
             targetClauses.str("");
+            mapClauses.str("");
             for(int i = 0; i < (int) d->getNumClauses(); ++i) {
                 OMPClause *c = d->clauses()[i];
-                if(!c->isImplicit() and c->getClauseKind() != OMPC_map) {
-                        if(i == 0)
-                            end = d->clauses()[0]->getLocStart().getLocWithOffset(-1);
-                        targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),c->getLocEnd()));
-                        rewriter.RemoveText(SourceRange(c->getLocStart(),c->getLocEnd()));
+                if(!c->isImplicit()) {
+                        if(c->getClauseKind() != OMPC_map)
+                            targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),c->getLocEnd()));
+                        else
+                            mapClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),c->getLocEnd()));
                 }
             }
-
-            rewriter.ReplaceText(SourceRange(start,end),"omp target data");
+            SourceLocation leftBrkt = Lexer::findLocationAfterToken(d->getLocEnd(),tok::l_brace,rewriter.getSourceMgr(),rewriter.getLangOpts(),true);
+            if(leftBrkt.isValid()) {
+                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-8),leftBrkt));
+                removeRightBrkt(leftBrkt);
+            }
+            else
+                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-8),leftBrkt));
             inTarget = true;
             return true;
         }
 
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
-            if(!firstParallel)
+            if(inTarget)
             {
-                const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
-                for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end();iter++)
-                {
-                    std::cout >> iter->getStmtClassName() << std::endl;
-                }
-            }
-            if(inTarget) {
+               if(!firstParallel) { 
+                   firstParallel = true;
+                   rewriter.InsertText(d->getLocStart().getLocWithOffset(-8), "#pragma omp target data " + mapClauses.str() + "{\n", true, true);
+                   const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
+                   for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end();iter++) {
+                       if(isa<OMPDistributeParallelForDirective>(*iter))
+                           numParallel++;
+                   }
+               }
+               curParallel++;
+               if(numParallel == curParallel)
+                   addRightBrkt(d);
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
                 rewriter.InsertText(d->getLocEnd()," " + targetClauses.str());
             }
-            if(inTarget)
-                inParallel = true;
             return true;
         }
 };
@@ -93,7 +147,6 @@ class MyASTConsumer : public ASTConsumer {
         bool HandleTopLevelDecl(DeclGroupRef DR) override {
             for(DeclGroupRef::iterator b = DR.begin(), e = DR.end(); b !=e; ++b) {
                 visitor.TraverseDecl(*b);
-                (*b)->dump();
             }
             return true;
         }
