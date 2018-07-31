@@ -26,7 +26,8 @@
 
 #define PRAGMA_SIZE 8
 #define DEFAULT_THREAD_LIMIT 128
-#define DEFAULT_BLOCK_NUMBER 448
+#define DEFAULT_NUM_TEAMS 112
+#define MAX_BLOCKS 448
 
 using namespace llvm;
 using namespace clang;
@@ -54,8 +55,11 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         int parallelDepth;
 
         //Variables used for the application of custom grid geometry
+        bool customGeo = true;
+        bool searchFor = false;
+        int totalParallelism;
+        int loopsToCheck;
         int threadLimit = DEFAULT_THREAD_LIMIT;
-        int blockNum = DEFAULT_BLOCK_NUMBER;
         
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
@@ -141,6 +145,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
             //Performs the actual full traversal of the subtree with the previously calculated information
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
+            threadLimit = DEFAULT_THREAD_LIMIT;
             inTarget = false;
             firstParallel = false;
             hasParallel = false;
@@ -177,21 +182,35 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
             //Resets variables containing target region information
             inTarget = true;
+            customGeo = true;
             numParallel = 0;
             curParallel = 0;
             targetClauses.str("");
             mapClauses.str("");
 
             //Finds all clauses for the given directive and saves then for later use
-            for(int i = 0; i < (int) d->getNumClauses(); ++i) {
+            for (int i = 0; i < (int) d->getNumClauses(); ++i) {
                 OMPClause *c = d->clauses()[i];
-                if(!c->isImplicit()) {
-                        SourceLocation start = c->getLocStart();
-                        SourceLocation end = findRightParenth(start);
-                        if(c->getClauseKind() != OMPC_map)
-                            targetClauses << rewriter.getRewrittenText(SourceRange(start,end)) << " ";
-                        else
-                            mapClauses << rewriter.getRewrittenText(SourceRange(start,end)) << " ";
+                if (!c->isImplicit()) {
+                        SourceLocation end = findRightParenth(c->getLocStart());
+                        if (c->getClauseKind() == OMPC_thread_limit) {
+                            const OMPThreadLimitClause *co = d->getSingleClause<OMPThreadLimitClause>();
+                            Expr *threadL = co->getThreadLimit();
+                            APSInt num;
+                            if (threadL->EvaluateAsInt(num,context))
+                                threadLimit = num.getExtValue();
+                            else
+                                customGeo = false;
+                            targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
+                        }
+                        else if (c->getClauseKind() == OMPC_num_teams) {
+                            customGeo = false;
+                            targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
+                        }
+                        else if (c->getClauseKind() == OMPC_map)
+                            mapClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
+                        else 
+                            targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                 }
             }
 
@@ -217,7 +236,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                 parallelDepth = stmtDepth;
 
             //Handles the transformation of the directive that it at the highest depth
-            else if (inTarget and !findEnd and stmtDepth == parallelDepth) {
+            else if (inTarget and !findEnd and !searchFor and stmtDepth == parallelDepth) {
                 curParallel++;
                
                 //Calculates the number of parallel regions at the given depth and handles all serial regions
@@ -266,10 +285,100 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
                 //Converts the directive into its own target region
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
+                std::stringstream clauses;
                 if(inTargetData)
-                    rewriter.InsertText(d->getLocEnd()," " + mapClauses.str() + targetClauses.str());
-                else
-                    rewriter.InsertText(d->getLocEnd()," " + targetClauses.str());
+                    clauses << mapClauses.str();
+                clauses << targetClauses.str();
+                if(customGeo)
+                    clauses << "num_teams(" << calculateCustomGeo(d) << ")";
+                rewriter.InsertText(d->getLocEnd()," "+clauses.str());
+            }
+            return true;
+        }
+
+        int calculateCustomGeo(OMPDistributeParallelForDirective *d) {
+
+            //Checks for collapse
+            loopsToCheck = 1;
+            const OMPCollapseClause *c = d->getSingleClause<OMPCollapseClause>();
+            if(c) {
+                Expr *collapseExpr = c->getNumForLoops();
+                APSInt num;
+                if (collapseExpr->EvaluateAsInt(num,context))
+                    loopsToCheck = num.getExtValue();
+            }
+
+            //Collects the total parallelism available for the GPU
+            totalParallelism  = 0;
+            searchFor = true;
+            std::cout << "Begin Search at: " << d->getStmtClassName() << std::endl;
+            RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(d);
+            searchFor = false;
+
+            //Calculates the custom grid geometry based on the total parallelism
+            int numTeams;
+            if (totalParallelism == 0)
+                numTeams = DEFAULT_NUM_TEAMS; 
+            else if (totalParallelism/threadLimit > MAX_BLOCKS)
+                numTeams = MAX_BLOCKS;
+            else
+                numTeams = totalParallelism/threadLimit; 
+
+            return numTeams;
+        }
+
+        bool VisitForStmt(ForStmt *s) {
+            if(searchFor  and loopsToCheck > 0) {
+                Stmt *init = s->getInit();
+                Expr *cond = s->getCond();
+                Expr *incr = s->getInc();
+ 
+                if(init and cond and incr) {
+                    std::cout << "FOUND FOR STMT" << std::endl;
+                    int start, end, increment;
+
+                    init->dump();
+                    if (isa<DeclStmt>(init)) {
+                        std::cout << "FOUND DECL" << std::endl;
+                        DeclStmt *stmt = reinterpret_cast<DeclStmt*>(init);
+                        
+                    }
+                    else if (isa<BinaryOperator>(init)) {
+                        std::cout << "FOUND BINARY OP" << std::endl;
+                        BinaryOperator *stmt = reinterpret_cast<BinaryOperator*>(init);
+                        APSInt num;
+                        stmt->getRHS()->EvaluateAsInt(num,context);
+                        start = num.getExtValue();
+                        std::cout << "VALUE = " << start << std::endl;
+                    }
+                    else { 
+                        std::cout << "FOUND OTHER" << std::endl; 
+                    }
+                    cond->dump();
+                    if (isa<BinaryOperator>(cond)) {
+                        std::cout << "FOUND BINARY OP" << std::endl;
+                        BinaryOperator *stmt = reinterpret_cast<BinaryOperator*>(cond);
+                        APSInt num;
+                        stmt->getRHS()->EvaluateAsInt(num,context);
+                        end = num.getExtValue();
+                        std::cout << "VALUE = " << end << std::endl;
+                    }
+                    incr->dump();
+                    if (isa<UnaryOperator>(incr)) {
+                        std::cout << "FOUND UNARY OP" << std::endl;
+                        UnaryOperator *stmt = reinterpret_cast<UnaryOperator*>(cond);
+                        APSInt num;
+                        stmt->getRHS()->EvaluateAsInt(num,context);
+                        increment = num.getExtValue();
+                        std::cout << "VALUE = " << increment << std::endl;
+                    }
+
+                    --loopsToCheck;
+                }
+                else {
+                    loopsToCheck = 0;
+                    totalParallelism = 0;
+                }
             }
             return true;
         }
