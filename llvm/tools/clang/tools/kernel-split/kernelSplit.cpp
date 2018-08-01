@@ -297,7 +297,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         }
 
         int calculateCustomGeo(OMPDistributeParallelForDirective *d) {
-
             //Checks for collapse
             loopsToCheck = 1;
             const OMPCollapseClause *c = d->getSingleClause<OMPCollapseClause>();
@@ -309,9 +308,8 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             }
 
             //Collects the total parallelism available for the GPU
-            totalParallelism  = 0;
+            totalParallelism  = 1;
             searchFor = true;
-            std::cout << "Begin Search at: " << d->getStmtClassName() << std::endl;
             RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(d);
             searchFor = false;
 
@@ -327,60 +325,100 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return numTeams;
         }
 
+        //Function called up finding a for loop in the recursive traversal
         bool VisitForStmt(ForStmt *s) {
-            if(searchFor  and loopsToCheck > 0) {
-                Stmt *init = s->getInit();
-                Expr *cond = s->getCond();
-                Expr *incr = s->getInc();
- 
-                if(init and cond and incr) {
-                    std::cout << "FOUND FOR STMT" << std::endl;
-                    int start, end, increment;
-
-                    init->dump();
-                    if (isa<DeclStmt>(init)) {
-                        std::cout << "FOUND DECL" << std::endl;
-                        DeclStmt *stmt = reinterpret_cast<DeclStmt*>(init);
-                        
-                    }
-                    else if (isa<BinaryOperator>(init)) {
-                        std::cout << "FOUND BINARY OP" << std::endl;
-                        BinaryOperator *stmt = reinterpret_cast<BinaryOperator*>(init);
-                        APSInt num;
-                        stmt->getRHS()->EvaluateAsInt(num,context);
-                        start = num.getExtValue();
-                        std::cout << "VALUE = " << start << std::endl;
-                    }
-                    else { 
-                        std::cout << "FOUND OTHER" << std::endl; 
-                    }
-                    cond->dump();
-                    if (isa<BinaryOperator>(cond)) {
-                        std::cout << "FOUND BINARY OP" << std::endl;
-                        BinaryOperator *stmt = reinterpret_cast<BinaryOperator*>(cond);
-                        APSInt num;
-                        stmt->getRHS()->EvaluateAsInt(num,context);
-                        end = num.getExtValue();
-                        std::cout << "VALUE = " << end << std::endl;
-                    }
-                    incr->dump();
-                    if (isa<UnaryOperator>(incr)) {
-                        std::cout << "FOUND UNARY OP" << std::endl;
-                        UnaryOperator *stmt = reinterpret_cast<UnaryOperator*>(cond);
-                        APSInt num;
-                        stmt->getRHS()->EvaluateAsInt(num,context);
-                        increment = num.getExtValue();
-                        std::cout << "VALUE = " << increment << std::endl;
-                    }
-
-                    --loopsToCheck;
+            //Used when searching for parallelism by calculating the iterations of the given for loop
+            if(searchFor and loopsToCheck > 0) {
+                int iterations = getForStmtIterations(s);
+                if(iterations == 0) {
+                    totalParallelism = 0;
+                    loopsToCheck = 0;
                 }
                 else {
-                    loopsToCheck = 0;
-                    totalParallelism = 0;
+                    totalParallelism *= iterations;
+                    loopsToCheck--;
                 }
             }
             return true;
+        }
+
+        //Searches the given ForStmt for the start, end and increment
+        int getForStmtIterations(ForStmt *s) {            
+            int start, end, increment;
+            bool st = false, en = false, in = false;
+
+            Stmt *init = s->getInit();
+            Expr *cond = s->getCond();
+            Expr *incr = s->getInc();
+
+            //Tries to calculate the the start
+            if (init) {
+                if (isa<DeclStmt>(init))
+                    st = readDeclStmt(reinterpret_cast<DeclStmt*>(init),&start);
+                else if (isa<BinaryOperator>(init))
+                    st = readBinaryOperator(reinterpret_cast<BinaryOperator*>(init),&start); 
+            }
+
+            //Tries to calculate the end
+            if (cond) {
+                if (isa<BinaryOperator>(cond))
+                    en = readBinaryOperator(reinterpret_cast<BinaryOperator*>(cond),&end);
+            }
+            
+            //Tries to calculate the increment
+            if (incr) {
+                if (isa<UnaryOperator>(incr))
+                    in = readUnaryOperator(reinterpret_cast<UnaryOperator*>(incr),&increment);
+                else if (isa<BinaryOperator>(incr))
+                    in = readBinaryOperator(reinterpret_cast<BinaryOperator*>(incr),&increment);
+            }
+            
+            //If all found returns number of iterations, otherwise returns 0 which indicates failure
+            if (st and en and in)
+                return (end-start)/increment;
+            return 0;
+        }
+
+        //Searchs the binary operator for the right side value 
+        bool readBinaryOperator(BinaryOperator *op, int *result) {
+            APSInt num;
+            if(op->getRHS()->EvaluateAsInt(num,context)) {
+                *result = num.getExtValue();
+                return true;
+            }
+            return false;
+        }
+
+        //Searches the unary operator to calculate if it is an increment/decrement
+        bool readUnaryOperator(UnaryOperator *op, int *result) {
+            if(op->isIncrementOp()) {
+                *result = 1;
+                return true;
+            }
+            else if (op->isDecrementOp()) {
+                *result = -1;
+                return true;
+            }
+            return false;
+        }
+ 
+        //Searches the declaration statement to find what the values initialization is
+        bool readDeclStmt(DeclStmt *s, int *result) {
+            if(s->isSingleDecl()) {
+                Decl *d = s->getSingleDecl();
+                if(isa<VarDecl>(d)) {
+                    VarDecl *var = reinterpret_cast<VarDecl*>(d);
+                    if(var->hasInit()) {
+                        Expr *exp = var->getInit();
+                        APSInt num;
+                        if(exp->EvaluateAsInt(num,context)) {
+                            *result = num.getExtValue();
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
         }
 };
 
