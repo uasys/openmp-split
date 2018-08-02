@@ -1,38 +1,4 @@
-#include "clang/AST/AST.h"
-#include "clang/AST/Stmt.h"
-#include "clang/AST/ASTConsumer.h"
-#include "clang/AST/ASTContext.h"
-#include "clang/AST/StmtOpenMP.h"
-#include "clang/AST/OpenMPClause.h"
-#include "clang/AST/RecursiveASTVisitor.h"
-
-#include "clang/Frontend/ASTConsumers.h"
-#include "clang/Frontend/CompilerInstance.h"
-#include "clang/Frontend/FrontendActions.h"
-
-#include "clang/Rewrite/Core/Rewriter.h"
-#include "clang/Basic/TokenKinds.h"
-#include "clang/Lex/Lexer.h"
-#include "clang/Tooling/CommonOptionsParser.h"
-#include "clang/Tooling/Tooling.h"
-
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/CommandLine.h"
-
-#include <string>
-#include <sstream>
-#include <iostream>
-#include <iterator>
-
-#define PRAGMA_SIZE 8
-#define DEFAULT_THREAD_LIMIT 128
-#define DEFAULT_NUM_TEAMS 112
-#define MAX_BLOCKS 448
-
-using namespace llvm;
-using namespace clang;
-using namespace clang::driver;
-using namespace clang::tooling;
+#include "kernelSplit.h"
 
 class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
     private:
@@ -44,15 +10,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         std::stringstream mapClauses;
         bool inTarget = false;
         bool inTargetData = false;
-        bool hasParallel = false;
-        bool firstParallel = false;
-        bool findEnd = false;
-        SourceLocation endLoc;
-        bool findParallelDepth = false;
         int stmtDepth;
-        int parallelDepth;
-        SourceLocation strtPrl;
-        SourceLocation lastPrl;
 
         //Variables used for the application of custom grid geometry
         bool customGeo = true;
@@ -89,16 +47,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return;
         }
         
-        //Adds a right bracket at the end of the given subtree by finding the furthers end location within and adding a right bracket there
-        void addRightBrkt(Stmt *s) {
-            endLoc = s->getLocEnd();
-            findEnd = true;
-            RecursiveASTVisitor<MyASTVisitor>::TraverseStmt(s);
-            findEnd = false;
-            rewriter.InsertText(endLoc.getLocWithOffset(1), "}");
-            return;
-        }
-
         //Finds the location of the right parantheses of a given statement starting at loc
         SourceLocation findRightParenth(SourceLocation loc) {
             int lefts = 0;
@@ -123,43 +71,19 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return loc;
         }
 
-        //Function called by the visitor upon finding a stmt
-        bool VisitStmt(Stmt *s) {
-
-            //Used when calculating the end point of a subtree, compares the current statements end location to the furthest one calculated
-            if(findEnd and rewriter.getSourceMgr().isBeforeInTranslationUnit(endLoc,s->getLocEnd()))
-                endLoc = s->getLocEnd();
-
-            return true;
-        }
-        
-        //Function called by the visitor before traversing down an OpenMP "target teams" directive
-        bool TraverseOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
- 
-            //Performs a traversal of the subtree to calculate the highest depth parallel directive
-            stmtDepth = 0;
-            parallelDepth = -1;
-            hasParallel = false;
-            findParallelDepth = true;
-            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
-            findParallelDepth = false;
-
-            //Performs the actual full traversal of the subtree with the previously calculated information
-            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
-            threadLimit = DEFAULT_THREAD_LIMIT;
-            inTarget = false;
-            firstParallel = false;
-            hasParallel = false;            
-
-            return true;
-        }
-        
-        //Function called by the visitor before traversing down an OpenMP "target data" directive 
-        bool TraverseOMPTargetDataDirective(OMPTargetDataDirective *d) {
-            inTargetData = true;
-            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetDataDirective(d);
-            inTargetData = false;
-            return true;
+        Stmt* getTopCompoundStmt(Stmt *s) {
+            std::queue<Stmt*> q;
+            q.push(s);
+            Stmt *curr = NULL;
+            while(!q.empty()) {
+                curr = q.front();
+                q.pop();
+                if(isa<CapturedStmt>(*curr))
+                    return reinterpret_cast<CapturedStmt*>(curr)->getCapturedStmt();
+                for(StmtIterator iter = curr->child_begin(); iter!=curr->child_end(); ++iter)
+                    q.push(*iter);
+            }
+            return NULL;
         }
 
         //Function called by the visitor before traversing down a compound stmt (for, while, if, do, switch statments generally)
@@ -170,22 +94,32 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return true;
         }
 
-        //Function called by the visitor upon finding an OpenMP "target teams" directive
-        bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+        //Function called by the visitor before traversing down an OpenMP "target data" directive 
+        bool TraverseOMPTargetDataDirective(OMPTargetDataDirective *d) {
+            inTargetData = true;
+            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetDataDirective(d);
+            inTargetData = false;
+            return true;
+        }
 
-            //Prevents changes when just searching for parallel depth
-            if(findParallelDepth)
-                return true;
-            
-            //Prevents changes to a target region that is only serial but is in a target data region
-            if(!hasParallel and inTargetData)
-                return true;            
-
-            //Resets variables containing target region information
+        //Function called by the visitor before traversing down an OpenMP "target teams" directive
+        bool TraverseOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
+ 
+            //Performs the actual full traversal of the subtree with the previously calculated information
+            stmtDepth = 0;
             inTarget = true;
             customGeo = true;
             targetClauses.str("");
             mapClauses.str("");
+            RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
+            threadLimit = DEFAULT_THREAD_LIMIT;
+            inTarget = false;
+
+            return true;
+        }
+        
+        //Function called by the visitor upon finding an OpenMP "target teams" directive
+        bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
 
             //Finds all clauses for the given directive and saves then for later use
             for (int i = 0; i < (int) d->getNumClauses(); ++i) {
@@ -213,102 +147,57 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                 }
             }
 
-            //Removes the original target teams statement and any related brackets in the original source code 
+ 
+            //Finds the compound statement holding all the code within brackets
+            CompoundStmt *cmpS = reinterpret_cast<CompoundStmt*>(getTopCompoundStmt(d));
+            if(!cmpS)
+                 return true;
+            
+            //Removes the original target teams region 
             SourceLocation leftBrkt = Lexer::findLocationAfterToken(d->getLocEnd(),tok::l_brace,rewriter.getSourceMgr(),rewriter.getLangOpts(),true);
             if(leftBrkt.isValid()) {
-                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-PRAGMA_SIZE),leftBrkt));
+                rewriter.RemoveText(SourceRange(d->getLocStart(),leftBrkt));
                 removeRightBrkt(leftBrkt);
             }
             else
-                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-PRAGMA_SIZE),d->getLocEnd()));
+                rewriter.RemoveText(SourceRange(d->getLocStart(),d->getLocEnd()));
+
+            //Adds encompassing target data directive if not within one already
+            if (!inTargetData) {
+                rewriter.InsertText(d->getLocStart(), "omp target data "+mapClauses.str()+"\n{\n", true, true);
+                rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
+            }
+
+            //Blocks off the code within, placing serial regions in large target blocks and parallel regions in individual target blocks
+            bool prevSrl = false;
+            for (StmtIterator iter = cmpS->child_begin(); iter!=cmpS->child_end(); ++iter)
+            {
+                 if (isa<OMPDistributeParallelForDirective>(*iter)) {
+                     if(prevSrl)
+                         rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "}\n", true, true);
+                     prevSrl = false;
+                 }
+                 else if (!prevSrl) {
+                     if (isa<OMPExecutableDirective>(*iter))
+                         rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                     else
+                         rewriter.InsertText(iter->getLocStart(), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                     prevSrl = true;
+                 } 
+            }
+            
+           //Adds final serial region bracket if needed 
+           if (prevSrl)
+                rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
 
             return true;
         }
 
         //Function called by the visitor upon finding an OpenMP "distribute parallel for" directive
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
-            hasParallel = true;
  
-            //Compares the given directives depth to the highest one and calculates the last and first parallel directives
-            if (findParallelDepth) {
-                if(parallelDepth == -1) {
-                    strtPrl = d->getLocStart();
-                    lastPrl = strtPrl;
-                }
-                else if(rewriter.getSourceMgr().isBeforeInTranslationUnit(lastPrl,d->getLocStart()))
-                    lastPrl = d->getLocStart();
-                if(stmtDepth < parallelDepth or parallelDepth == -1)
-                    parallelDepth = stmtDepth;
-            }
-
-            //Handles the transformation of the directive that it at the highest depth
-            else if (inTarget and !findEnd and !searchFor and stmtDepth == parallelDepth) {
-               
-                //Calculates the number of parallel regions at the given depth and handles all serial regions
-                if (!firstParallel) {
-                    firstParallel = true;
-                   
-                    bool addTargetData = true;
-                    if (inTargetData or strtPrl == lastPrl)
-                        addTargetData = false;
- 
-                    //Adds and all encompassing target data region around parallel code and blocks all serial regions inbetween into seperate target regions 
-                    const Stmt *parent = context.getParents(*d)[0].get<Stmt>();
-                    const Stmt *prev = NULL;
-                    bool prevPrl = false;
-                    bool prevSrl = false;
-                    bool startSet = false;
-                    bool endSet = false;
-                    for(ConstStmtIterator iter = parent->child_begin(); iter!=parent->child_end(); ++iter) {
-
-                        if (!startSet and addTargetData) {
-                            if(rewriter.getSourceMgr().isBeforeInTranslationUnit(strtPrl,iter->getLocStart())) {
-                                if(isa<OMPExecutableDirective>(*prev))
-                                    rewriter.InsertText(prev->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
-                                else {
-                                    rewriter.InsertText(prev->getLocStart(), "#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
-                                    rewriter.InsertText(prev->getLocStart(), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
-                                }
-                                startSet = true;
-                            }
-                        }
-                        else if (!endSet and addTargetData) {
-                            if(rewriter.getSourceMgr().isBeforeInTranslationUnit(lastPrl,iter->getLocStart())) {
-                                rewriter.InsertText(iter->getLocStart(), "}\n", true, true);
-                                endSet = true;
-                            }
-                        }
-
-                        if (isa<OMPDistributeParallelForDirective>(*iter)) {
-                            if(prevSrl and startSet)
-                                rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "}\n", true, true);
-                            prevPrl = true;
-                            prevSrl = false;
-                        }
-                        else {
-                            if(prevPrl and !endSet)
-                                rewriter.InsertText(iter->getLocStart(), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
-                            prevPrl = false;
-                            prevSrl = true;
-                        }
-
-                        prev = *iter;
-                    }
-
-                    if (!startSet and addTargetData) {
-                        if(isa<OMPExecutableDirective>(*prev))
-                            rewriter.InsertText(prev->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
-                        else {
-                            rewriter.InsertText(prev->getLocStart(), "#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
-                            rewriter.InsertText(prev->getLocStart(), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
-                        }
-                    }
-
-                    if (!endSet and addTargetData)
-                        addRightBrkt(const_cast<Stmt*>(prev));
-                }
-
-                //Converts the directive into its own target region
+            //Transforms the distribute parallel statmement by adding a target teams if possible for the given directive
+            if (inTarget and !searchFor and stmtDepth == 1) {
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
                 std::stringstream clauses;
                 if(inTargetData)
