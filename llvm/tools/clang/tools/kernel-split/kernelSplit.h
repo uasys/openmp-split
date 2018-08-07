@@ -23,6 +23,7 @@
 #include <sstream>
 #include <iostream>
 #include <queue>
+#include <forward_list>
 
 #define PRAGMA_SIZE 8
 #define DEFAULT_THREAD_LIMIT 128
@@ -33,3 +34,10 @@ using namespace llvm;
 using namespace clang;
 using namespace clang::driver;
 using namespace clang::tooling;
+
+struct Variable {
+    std::string name;
+    SourceLocation loc;
+    OpenMPMapClauseKind mapKind;
+    int size = 0;
+};

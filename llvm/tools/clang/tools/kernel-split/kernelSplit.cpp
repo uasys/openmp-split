@@ -18,6 +18,10 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         int totalParallelism;
         int loopsToCheck;
         int threadLimit = DEFAULT_THREAD_LIMIT;
+
+        //Variables used for calculating all the implicit and explicit shared mappings required for the given code
+        std::forward_list<Variable> vars;
+        bool findMapping = false;
         
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
@@ -141,13 +145,16 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                             targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                         }
                         else if (c->getClauseKind() == OMPC_map)
-                            mapClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
+                            readMapping(reinterpret_cast<OMPMapClause*>(c));
+                            //mapClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                         else 
                             targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                 }
             }
 
- 
+            //Creates the new map clauses for the target teams area based on the data gathered
+            createNewMapClauses();
+
             //Finds the compound statement holding all the code within brackets
             CompoundStmt *cmpS = reinterpret_cast<CompoundStmt*>(getTopCompoundStmt(d));
             if(!cmpS)
@@ -342,6 +349,88 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             }
             return false;
         }
+
+        //Calculates the variables mapped in the given clause
+        void readMapping(OMPMapClause *c) {
+            OpenMPMapClauseKind mapKind = c->getMapType();
+
+            for (StmtIterator iter = c->children().begin(); iter!=c->children().end(); ++iter) {
+                if (isa<OMPArraySectionExpr>(*iter)) {
+                    OMPArraySectionExpr *ompArray = reinterpret_cast<OMPArraySectionExpr*>(*iter);
+                    Expr *exp = ompArray->getBase();
+                    if (isa<ImplicitCastExpr>(*exp))
+                        exp = reinterpret_cast<ImplicitCastExpr*>(exp)->getSubExpr();
+                    if (!isa<DeclRefExpr>(*exp))
+                        continue;
+                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
+
+                    APSInt length;
+                    ompArray->getLength()->EvaluateAsInt(length,context);
+                    int size = length.getExtValue();
+                  
+                    addMapping(vDecl->getNameAsString(),vDecl->getLocStart(),mapKind, size);
+                }
+            }
+            return;
+        }
+
+        bool addMapping(std::string name, SourceLocation loc, OpenMPMapClauseKind mapKind, int size) {
+            if (checkMappings(loc, mapKind, size)) {
+                Variable newVar;
+                newVar.name = name, newVar.loc = loc, newVar.mapKind = mapKind, newVar.size = size;
+                vars.push_front(newVar);
+                return true;
+            }
+            return false;
+        }
+
+        bool checkMappings(SourceLocation loc, OpenMPMapClauseKind mapKind, int size) {
+            auto iter = vars.begin();
+            while (iter != vars.end()) {
+                if (iter->loc == loc) {
+                    if (iter->size < size)
+                        iter->size = size;
+                    if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
+                        iter->mapKind = mapKind;
+                    else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
+                        iter->mapKind = OMPC_MAP_tofrom;
+                    return false;
+                }
+                ++iter; 
+            }
+            return true;
+        }
+
+        void createNewMapClauses() {
+            int alloc = 0, to = 0, from = 0, tofrom = 0;
+            std::stringstream a, t, f, tf;
+            a << "map(alloc :";
+            t << "map(to :";
+            f << "map(from :";
+            tf << "map(tofrom :";
+            
+            auto iter = vars.begin();
+            while (iter != vars.end()) {
+                switch(iter->mapKind) {
+                    case OMPC_MAP_alloc:  if (alloc > 0)  a  << ",";  a << " " << iter->name << "[:" << iter->size << "]"; alloc++;  break;
+                    case OMPC_MAP_to:     if (to > 0)     t  << ",";  t << " " << iter->name << "[:" << iter->size << "]"; to++;     break;
+                    case OMPC_MAP_from:   if (from > 0)   f  << ",";  f << " " << iter->name << "[:" << iter->size << "]"; from++;   break;
+                    case OMPC_MAP_tofrom: if (tofrom > 0) tf << ","; tf << " " << iter->name << "[:" << iter->size << "]"; tofrom++; break;
+                    default:              if (tofrom > 0) tf << ","; tf << " " << iter->name << "[:" << iter->size << "]"; tofrom++; break;
+                }
+                ++iter;
+            }
+            if (alloc)
+                mapClauses << a.str() << ") ";
+            if (to)
+                mapClauses << t.str() << ") ";
+            if (from)
+                mapClauses << f.str() << ") ";
+            if (tofrom)
+                mapClauses << tf.str() << ") ";
+            return;
+        }
+
 };
 
 //Consumes the created AST by the compiler, with each found function initiates a traversal from which the recursive visitor works
