@@ -40,4 +40,11 @@ struct Variable {
     SourceLocation loc;
     OpenMPMapClauseKind mapKind;
     int size = 0;
+    bool alreadyMapped = false;
+};
+
+struct Iterator {
+    std::string name;
+    SourceLocation loc;
+    int maxSize = 0;
 };

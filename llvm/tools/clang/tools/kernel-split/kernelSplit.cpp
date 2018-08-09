@@ -21,7 +21,9 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
         //Variables used for calculating all the implicit and explicit shared mappings required for the given code
         std::forward_list<Variable> vars;
-        bool findMapping = false;
+        std::forward_list<Iterator> loopIterators;
+        bool findMappings = false;
+        SourceLocation startOfTarget;
         
     public:
         MyASTVisitor(Rewriter &R, ASTContext &C) : rewriter(R) , context(C) {}
@@ -75,6 +77,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return loc;
         }
 
+        //Function used to retrieve the top level compound stmt, corresponding to the region right within the initial target teams brackets
         Stmt* getTopCompoundStmt(Stmt *s) {
             std::queue<Stmt*> q;
             q.push(s);
@@ -111,10 +114,12 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
  
             //Performs the actual full traversal of the subtree with the previously calculated information
             stmtDepth = 0;
-            inTarget = true;
             customGeo = true;
+            inTarget = true;
             targetClauses.str("");
             mapClauses.str("");
+            vars.clear();
+            loopIterators.clear();
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
             threadLimit = DEFAULT_THREAD_LIMIT;
             inTarget = false;
@@ -146,13 +151,17 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                         }
                         else if (c->getClauseKind() == OMPC_map)
                             readMapping(reinterpret_cast<OMPMapClause*>(c));
-                            //mapClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                         else 
                             targetClauses << rewriter.getRewrittenText(SourceRange(c->getLocStart(),end)) << " ";
                 }
             }
 
             //Creates the new map clauses for the target teams area based on the data gathered
+            findMappings = true;
+            startOfTarget = d->getLocStart();
+            for (StmtIterator iter = d->child_begin(); iter!=d->child_end(); ++iter)
+                TraverseStmt(*iter);
+            findMappings = false;
             createNewMapClauses();
 
             //Finds the compound statement holding all the code within brackets
@@ -163,15 +172,15 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             //Removes the original target teams region 
             SourceLocation leftBrkt = Lexer::findLocationAfterToken(d->getLocEnd(),tok::l_brace,rewriter.getSourceMgr(),rewriter.getLangOpts(),true);
             if(leftBrkt.isValid()) {
-                rewriter.RemoveText(SourceRange(d->getLocStart(),leftBrkt));
+                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-PRAGMA_SIZE),leftBrkt));
                 removeRightBrkt(leftBrkt);
             }
             else
-                rewriter.RemoveText(SourceRange(d->getLocStart(),d->getLocEnd()));
+                rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-PRAGMA_SIZE),d->getLocEnd()));
 
             //Adds encompassing target data directive if not within one already
             if (!inTargetData) {
-                rewriter.InsertText(d->getLocStart(), "omp target data "+mapClauses.str()+"\n{\n", true, true);
+                rewriter.InsertText(cmpS->getLBracLoc(), "\n#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
                 rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
             }
 
@@ -186,9 +195,9 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                  }
                  else if (!prevSrl) {
                      if (isa<OMPExecutableDirective>(*iter))
-                         rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                         rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#\npragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
                      else
-                         rewriter.InsertText(iter->getLocStart(), "#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                         rewriter.InsertText(iter->getLocStart(), "\n#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
                      prevSrl = true;
                  } 
             }
@@ -204,7 +213,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
  
             //Transforms the distribute parallel statmement by adding a target teams if possible for the given directive
-            if (inTarget and !searchFor and stmtDepth == 1) {
+            if (inTarget and !searchFor and !findMappings and stmtDepth == 1) {
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
                 std::stringstream clauses;
                 if(inTargetData)
@@ -217,6 +226,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return true;
         }
 
+        //Function that calculates improved custom grid geometry for a given distribute parallel for statement
         int calculateCustomGeo(OMPDistributeParallelForDirective *d) {
             //Checks for collapse
             loopsToCheck = 1;
@@ -240,6 +250,8 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                 numTeams = DEFAULT_NUM_TEAMS; 
             else if (totalParallelism/threadLimit > MAX_BLOCKS)
                 numTeams = MAX_BLOCKS;
+            else if (totalParallelism/threadLimit == 0)
+                numTeams = 1;
             else
                 numTeams = totalParallelism/threadLimit; 
 
@@ -309,7 +321,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     return true;
                 }
             }
-            else if (!isa<ImplicitCastExpr>(op->getRHS())) {
+            if (!isa<ImplicitCastExpr>(op->getRHS())) {
                 if(op->getRHS()->EvaluateAsInt(num,context)) {
                     *result = num.getExtValue();
                     return true;
@@ -350,6 +362,110 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return false;
         }
 
+        //Used by the find mapping function to keep track of and record loop iterators that are available for a given array indexing 
+        bool TraverseForStmt(ForStmt *s) {
+            bool added = false;
+            if (findMappings) {
+                Expr *exp = s->getCond();
+                Expr *name;
+                APSInt maxSize;
+                bool isEquals = false;
+                if (isa<BinaryOperator>(*exp)) {
+                    BinaryOperator *op = reinterpret_cast<BinaryOperator*>(exp);
+                    if (op->getRHS()->EvaluateAsInt(maxSize,context))
+                        name = op->getLHS();
+                    else if (op->getLHS()->EvaluateAsInt(maxSize,context))
+                        name = op->getRHS();
+                    if (op->getOpcode() == BO_LE or op->getOpcode() == BO_GE or op->getOpcode() == BO_EQ)
+                        isEquals = true;
+                }
+
+                if (name) {
+                    if (isa<ImplicitCastExpr>(*name))
+                        name = reinterpret_cast<ImplicitCastExpr*>(name)->getSubExpr();
+                    if (isa<DeclRefExpr>(*name)) {
+                        added = true;
+                        Iterator newI;
+                        VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(name)->getDecl());
+                        newI.name = vDecl->getNameAsString();
+                        newI.loc = vDecl->getLocStart();
+                        newI.maxSize = maxSize.getExtValue(); 
+                        if (!isEquals)
+                            newI.maxSize--;
+                        loopIterators.push_front(newI);
+                    }
+                }
+            }
+            RecursiveASTVisitor<MyASTVisitor>::TraverseForStmt(s);
+            if (findMappings and added)
+                loopIterators.pop_front();
+            return true;
+        }
+
+        int getVarValue(Expr *e) {
+             if (isa<BinaryOperator>(*e))
+                 return calculateOperation(reinterpret_cast<BinaryOperator*>(e));
+             else if (isa<ImplicitCastExpr>(*e)) {
+                Expr *exp = reinterpret_cast<ImplicitCastExpr*>(e)->getSubExpr();
+                if (isa<DeclRefExpr>(*exp)) {
+                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
+                    auto iter = loopIterators.begin();
+                    while (iter != loopIterators.end()) {
+                        if (iter->loc == vDecl->getLocStart())
+                            return iter->maxSize;
+                        ++iter;
+                    }
+                }
+             }
+             else if (isa<IntegerLiteral>(*e)) {
+                  APSInt value;
+                  e->EvaluateAsInt(value, context);
+                  return value.getExtValue();
+             }
+             return 0;
+        }
+
+        //Calculates the given binary operation if constants are present recursively
+        int calculateOperation(BinaryOperator* bop) {
+            int leftVal = getVarValue(bop->getLHS());
+            int righVal = getVarValue(bop->getRHS()); 
+           
+            switch (bop->getOpcode()) {
+                case (BO_Mul): return leftVal * righVal;
+                case (BO_Div): return leftVal / righVal;
+                case (BO_Rem): return leftVal % righVal;
+                case (BO_Add): return leftVal + righVal;
+                case (BO_Sub): return leftVal - righVal; 
+                default: break;
+            }
+            return 0; 
+        }
+
+        //Used to find all implicit mappings of arrays that must be performed
+        bool VisitArraySubscriptExpr(ArraySubscriptExpr *e) {
+            if (findMappings) {
+
+                Expr *exp = e->getBase();
+                if (isa<ImplicitCastExpr>(*exp))
+                    exp = reinterpret_cast<ImplicitCastExpr*>(exp)->getSubExpr();
+                if (!isa<DeclRefExpr>(*exp))
+                    return true;
+                VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
+           
+                if (rewriter.getSourceMgr().isBeforeInTranslationUnit(startOfTarget,vDecl->getLocStart()))
+                    return true;
+
+                APSInt index;
+                int size = -1;
+                if (e->getIdx()->EvaluateAsInt(index,context))
+                    size = index.getExtValue();
+                else if (isa<BinaryOperator>(*(e->getIdx())))
+                    size = calculateOperation(reinterpret_cast<BinaryOperator*>(e->getIdx()))+1;
+                addMapping(vDecl->getNameAsString(),vDecl->getLocStart(),OMPC_MAP_tofrom, size);
+            }
+            return true;
+        }
+
         //Calculates the variables mapped in the given clause
         void readMapping(OMPMapClause *c) {
             OpenMPMapClauseKind mapKind = c->getMapType();
@@ -365,35 +481,40 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
 
                     APSInt length;
-                    ompArray->getLength()->EvaluateAsInt(length,context);
-                    int size = length.getExtValue();
-                  
-                    addMapping(vDecl->getNameAsString(),vDecl->getLocStart(),mapKind, size);
+                    int size = -1;
+                    if (ompArray->getLength()->EvaluateAsInt(length,context))
+                        size = length.getExtValue();
+                 
+                    addMapping(vDecl->getNameAsString(), vDecl->getLocStart(), mapKind, size, true);
                 }
             }
             return;
         }
 
-        bool addMapping(std::string name, SourceLocation loc, OpenMPMapClauseKind mapKind, int size) {
-            if (checkMappings(loc, mapKind, size)) {
+        //Adds the given mem object to the list of those to be mapped
+        bool addMapping(std::string name, SourceLocation loc, OpenMPMapClauseKind mapKind, int size, bool inExistingMap=false) {
+            if (checkMappings(loc, mapKind, size) and size != -1) {
                 Variable newVar;
-                newVar.name = name, newVar.loc = loc, newVar.mapKind = mapKind, newVar.size = size;
+                newVar.name = name, newVar.loc = loc, newVar.mapKind = mapKind, newVar.size = size, newVar.alreadyMapped = inExistingMap;
                 vars.push_front(newVar);
                 return true;
             }
             return false;
         }
 
+        //Checks the given mem object to see if it is already recorded for mapping and updates map type and size if needed
         bool checkMappings(SourceLocation loc, OpenMPMapClauseKind mapKind, int size) {
             auto iter = vars.begin();
             while (iter != vars.end()) {
                 if (iter->loc == loc) {
                     if (iter->size < size)
                         iter->size = size;
-                    if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
-                        iter->mapKind = mapKind;
-                    else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
-                        iter->mapKind = OMPC_MAP_tofrom;
+                    if (!iter->alreadyMapped) {
+                        if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
+                            iter->mapKind = mapKind;
+                        else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
+                            iter->mapKind = OMPC_MAP_tofrom;
+                    }
                     return false;
                 }
                 ++iter; 
@@ -401,6 +522,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return true;
         }
 
+        //Creates the resulting map clauses for the target region based on the analysis of the target region
         void createNewMapClauses() {
             int alloc = 0, to = 0, from = 0, tofrom = 0;
             std::stringstream a, t, f, tf;
@@ -412,11 +534,41 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             auto iter = vars.begin();
             while (iter != vars.end()) {
                 switch(iter->mapKind) {
-                    case OMPC_MAP_alloc:  if (alloc > 0)  a  << ",";  a << " " << iter->name << "[:" << iter->size << "]"; alloc++;  break;
-                    case OMPC_MAP_to:     if (to > 0)     t  << ",";  t << " " << iter->name << "[:" << iter->size << "]"; to++;     break;
-                    case OMPC_MAP_from:   if (from > 0)   f  << ",";  f << " " << iter->name << "[:" << iter->size << "]"; from++;   break;
-                    case OMPC_MAP_tofrom: if (tofrom > 0) tf << ","; tf << " " << iter->name << "[:" << iter->size << "]"; tofrom++; break;
-                    default:              if (tofrom > 0) tf << ","; tf << " " << iter->name << "[:" << iter->size << "]"; tofrom++; break;
+                    case OMPC_MAP_alloc:  
+                        if (alloc > 0)  a  << ",";  
+                        a << " " << iter->name << "[:"; 
+                        if (iter->size == -1) a  << "]"; 
+                        else  a << iter->size << "]"; 
+                        alloc++;  
+                        break;
+                    case OMPC_MAP_to:     
+                        if (to > 0) t  << ",";  
+                        t << " " << iter->name << "[:"; 
+                        if (iter->size == -1) t  << "]"; 
+                        else  t << iter->size << "]"; 
+                        to++;     
+                        break;
+                    case OMPC_MAP_from:
+                        if (from > 0) f  << ",";  
+                        f << " " << iter->name << "[:"; 
+                        if (iter->size == -1) f << "]"; 
+                        else f << iter->size << "]"; 
+                        from++;     
+                        break;
+                    case OMPC_MAP_tofrom:
+                        if (tofrom > 0) tf << ",";  
+                        tf << " " << iter->name << "[:"; 
+                        if (iter->size == -1) tf  << "]"; 
+                        else  tf << iter->size << "]"; 
+                        tofrom++;     
+                        break;
+                    default:
+                        if (tofrom > 0) tf << ",";  
+                        tf << " " << iter->name << "[:"; 
+                        if (iter->size == -1) tf  << "]"; 
+                        else  tf << iter->size << "]"; 
+                        tofrom++;     
+                        break;
                 }
                 ++iter;
             }
@@ -429,8 +581,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             if (tofrom)
                 mapClauses << tf.str() << ") ";
             return;
-        }
-
+        }        
 };
 
 //Consumes the created AST by the compiler, with each found function initiates a traversal from which the recursive visitor works
