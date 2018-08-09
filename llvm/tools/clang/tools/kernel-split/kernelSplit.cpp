@@ -388,7 +388,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                         Iterator newI;
                         VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(name)->getDecl());
                         newI.name = vDecl->getNameAsString();
-                        newI.loc = vDecl->getLocStart();
                         newI.maxSize = maxSize.getExtValue(); 
                         if (!isEquals)
                             newI.maxSize--;
@@ -402,6 +401,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return true;
         }
 
+        //Returns the value held for a specific expression that is either a literal, operation or a variable
         int getVarValue(Expr *e) {
              if (isa<BinaryOperator>(*e))
                  return calculateOperation(reinterpret_cast<BinaryOperator*>(e));
@@ -411,7 +411,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
                     auto iter = loopIterators.begin();
                     while (iter != loopIterators.end()) {
-                        if (iter->loc == vDecl->getLocStart())
+                        if (iter->name == vDecl->getNameAsString())
                             return iter->maxSize;
                         ++iter;
                     }
@@ -461,7 +461,20 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     size = index.getExtValue();
                 else if (isa<BinaryOperator>(*(e->getIdx())))
                     size = calculateOperation(reinterpret_cast<BinaryOperator*>(e->getIdx()))+1;
-                addMapping(vDecl->getNameAsString(),vDecl->getLocStart(),OMPC_MAP_tofrom, size);
+                addMapping(vDecl->getNameAsString(), OMPC_MAP_tofrom, size, true);
+            }
+            return true;
+        }
+
+        //Used to find all implicit mappings of variables that must be performed
+        bool VisitDeclRefExpr(DeclRefExpr *dex) {
+            if (findMappings) {
+                if (!isa<VarDecl>(*(dex->getDecl())))
+                    return true;
+                VarDecl *vDecl = reinterpret_cast<VarDecl*>(dex->getDecl());
+                if (rewriter.getSourceMgr().isBeforeInTranslationUnit(startOfTarget,vDecl->getLocStart()))
+                    return true;
+                addMapping(vDecl->getNameAsString(), OMPC_MAP_tofrom, 0, false); 
             }
             return true;
         }
@@ -485,17 +498,17 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     if (ompArray->getLength()->EvaluateAsInt(length,context))
                         size = length.getExtValue();
                  
-                    addMapping(vDecl->getNameAsString(), vDecl->getLocStart(), mapKind, size, true);
+                    addMapping(vDecl->getNameAsString(), mapKind, size, true, true);
                 }
             }
             return;
         }
 
         //Adds the given mem object to the list of those to be mapped
-        bool addMapping(std::string name, SourceLocation loc, OpenMPMapClauseKind mapKind, int size, bool inExistingMap=false) {
-            if (checkMappings(loc, mapKind, size) and size != -1) {
+        bool addMapping(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray, bool inExistingMap=false) {
+            if (checkMappings(name, mapKind, size, isArray) and size != -1) {
                 Variable newVar;
-                newVar.name = name, newVar.loc = loc, newVar.mapKind = mapKind, newVar.size = size, newVar.alreadyMapped = inExistingMap;
+                newVar.name = name, newVar.mapKind = mapKind, newVar.size = size, newVar.array = isArray, newVar.alreadyMapped = inExistingMap;
                 vars.push_front(newVar);
                 return true;
             }
@@ -503,10 +516,10 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         }
 
         //Checks the given mem object to see if it is already recorded for mapping and updates map type and size if needed
-        bool checkMappings(SourceLocation loc, OpenMPMapClauseKind mapKind, int size) {
+        bool checkMappings(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray) {
             auto iter = vars.begin();
             while (iter != vars.end()) {
-                if (iter->loc == loc) {
+                if (iter->name == name) {
                     if (iter->size < size)
                         iter->size = size;
                     if (!iter->alreadyMapped) {
@@ -515,6 +528,8 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                         else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
                             iter->mapKind = OMPC_MAP_tofrom;
                     }
+                    if(isArray)
+                        iter->array = isArray;
                     return false;
                 }
                 ++iter; 
@@ -525,7 +540,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Creates the resulting map clauses for the target region based on the analysis of the target region
         void createNewMapClauses() {
             int alloc = 0, to = 0, from = 0, tofrom = 0;
-            std::stringstream a, t, f, tf;
+            std::stringstream a, t, f, tf, temp;
             a << "map(alloc :";
             t << "map(to :";
             f << "map(from :";
@@ -533,40 +548,37 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             
             auto iter = vars.begin();
             while (iter != vars.end()) {
+                temp.str("");
+                if (iter->array) {
+                    temp << "[:"; 
+                    if (iter->size != -1)
+                        temp << iter->size;
+                    temp << "]";
+                }
                 switch(iter->mapKind) {
                     case OMPC_MAP_alloc:  
                         if (alloc > 0)  a  << ",";  
-                        a << " " << iter->name << "[:"; 
-                        if (iter->size == -1) a  << "]"; 
-                        else  a << iter->size << "]"; 
+                        a << " " << iter->name << temp.str();
                         alloc++;  
                         break;
                     case OMPC_MAP_to:     
-                        if (to > 0) t  << ",";  
-                        t << " " << iter->name << "[:"; 
-                        if (iter->size == -1) t  << "]"; 
-                        else  t << iter->size << "]"; 
+                        if (to > 0) t  << ",";
+                        t << " " << iter->name << temp.str();
                         to++;     
                         break;
                     case OMPC_MAP_from:
                         if (from > 0) f  << ",";  
-                        f << " " << iter->name << "[:"; 
-                        if (iter->size == -1) f << "]"; 
-                        else f << iter->size << "]"; 
+                        f << " " << iter->name << temp.str();
                         from++;     
                         break;
                     case OMPC_MAP_tofrom:
                         if (tofrom > 0) tf << ",";  
-                        tf << " " << iter->name << "[:"; 
-                        if (iter->size == -1) tf  << "]"; 
-                        else  tf << iter->size << "]"; 
+                        tf << " " << iter->name << temp.str();
                         tofrom++;     
                         break;
                     default:
                         if (tofrom > 0) tf << ",";  
-                        tf << " " << iter->name << "[:"; 
-                        if (iter->size == -1) tf  << "]"; 
-                        else  tf << iter->size << "]"; 
+                        tf << " " << iter->name << temp.str();
                         tofrom++;     
                         break;
                 }

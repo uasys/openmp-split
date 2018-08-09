@@ -37,14 +37,13 @@ using namespace clang::tooling;
 
 struct Variable {
     std::string name;
-    SourceLocation loc;
     OpenMPMapClauseKind mapKind;
     int size = 0;
     bool alreadyMapped = false;
+    bool array = true;
 };
 
 struct Iterator {
     std::string name;
-    SourceLocation loc;
     int maxSize = 0;
 };
