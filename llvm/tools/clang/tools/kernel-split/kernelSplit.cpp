@@ -12,6 +12,9 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         bool inTargetData = false;
         int stmtDepth;
 
+        //Variables used for the proper calculation of any shared, in target defined variables that must be accounted for
+        std::list<VariableRange> varRanges;
+
         //Variables used for the application of custom grid geometry
         bool customGeo = true;
         bool searchFor = false;
@@ -164,6 +167,21 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             findMappings = false;
             createNewMapClauses();
 
+            //Calculates the internal blocking for internally defined variables
+            auto frntIter = varRanges.begin();
+            auto varIter = varRanges.begin();
+            varIter++;
+            while (varIter != varRanges.end()) {
+                if (rewriter.getSourceMgr().isBeforeInTranslationUnit(varIter->range.getBegin(),frntIter->range.getEnd())) {
+                    if (rewriter.getSourceMgr().isBeforeInTranslationUnit(frntIter->range.getEnd(),varIter->range.getEnd()))
+                        frntIter->range.setEnd(varIter->range.getEnd());
+                    varIter->name = "";
+                }
+                else
+                    frntIter = varIter;
+                varIter++;
+            }
+ 
             //Finds the compound statement holding all the code within brackets
             CompoundStmt *cmpS = reinterpret_cast<CompoundStmt*>(getTopCompoundStmt(d));
             if(!cmpS)
@@ -186,20 +204,25 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
             //Blocks off the code within, placing serial regions in large target blocks and parallel regions in individual target blocks
             bool prevSrl = false;
-            for (StmtIterator iter = cmpS->child_begin(); iter!=cmpS->child_end(); ++iter)
-            {
+            bool prevSafe = true;
+            bool isSafe = false;
+            for (StmtIterator iter = cmpS->child_begin(); iter!=cmpS->child_end(); ++iter) {
+                 isSafe = getLocationSafety(iter->getLocStart());
                  if (isa<OMPDistributeParallelForDirective>(*iter)) {
-                     if(prevSrl)
+                     if (isSafe and prevSrl)
                          rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "}\n", true, true);
                      prevSrl = false;
                  }
                  else if (!prevSrl) {
-                     if (isa<OMPExecutableDirective>(*iter))
-                         rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "#\npragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
-                     else
-                         rewriter.InsertText(iter->getLocStart(), "\n#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                     if (prevSafe) { 
+                         if (isa<OMPExecutableDirective>(*iter))
+                             rewriter.InsertText(iter->getLocStart().getLocWithOffset(-PRAGMA_SIZE), "\n#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                         else
+                             rewriter.InsertText(iter->getLocStart(), "\n#pragma omp target teams "+targetClauses.str()+"\n{\n", true, true);
+                     }
                      prevSrl = true;
-                 } 
+                 }
+                 prevSafe = isSafe;
             }
             
            //Adds final serial region bracket if needed 
@@ -209,11 +232,53 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return true;
         }
 
+        //Checks if the given location is within a variable declaration of a target region and so is not safe to put in an independent target region
+        bool getLocationSafety(SourceLocation loc) {
+            auto iter = varRanges.begin();
+            while (iter != varRanges.end()) {
+                if (iter->name != "") {
+                    if (rewriter.getSourceMgr().isBeforeInTranslationUnit(iter->range.getBegin(),loc)) {
+                        if (rewriter.getSourceMgr().isBeforeInTranslationUnit(loc, iter->range.getEnd()))
+                            return false;
+                    }
+                    else
+                        break;
+                }
+                iter++;
+            }
+            return true;
+        }
+
+        //Function called by the visitor upon finding the declaration of a variable, used for safety analysis
+        bool VisitVarDecl(VarDecl *vd) {
+            if (findMappings and stmtDepth == 1) {
+                VariableRange newRange;
+                newRange.name = vd->getNameAsString();
+                newRange.range.setBegin(vd->getLocStart());
+                newRange.range.setEnd(vd->getLocEnd());
+                varRanges.push_back(newRange);
+            } 
+            return true;
+        }
+
+        //Updates the end of the range for a given varDecl based on where an access has been made
+        void checkVarDecl(std::string name, SourceLocation loc) {
+            auto iter = varRanges.begin();
+            while (iter != varRanges.end()) {
+                if (iter->name == name) {
+                    iter->range.setEnd(loc);
+                    break;
+                }
+                iter++;
+            }
+            return;
+        }
+
         //Function called by the visitor upon finding an OpenMP "distribute parallel for" directive
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
  
             //Transforms the distribute parallel statmement by adding a target teams if possible for the given directive
-            if (inTarget and !searchFor and !findMappings and stmtDepth == 1) {
+            if (inTarget and !searchFor and !findMappings and stmtDepth == 1 and getLocationSafety(d->getLocStart())) {
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
                 std::stringstream clauses;
                 if(inTargetData)
@@ -366,6 +431,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         bool TraverseForStmt(ForStmt *s) {
             bool added = false;
             if (findMappings) {
+                stmtDepth++;
                 Expr *exp = s->getCond();
                 Expr *name;
                 APSInt maxSize;
@@ -396,8 +462,11 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                 }
             }
             RecursiveASTVisitor<MyASTVisitor>::TraverseForStmt(s);
-            if (findMappings and added)
-                loopIterators.pop_front();
+            if (findMappings) {
+                stmtDepth--;
+                if (added)
+                    loopIterators.pop_front();
+            }
             return true;
         }
 
@@ -444,7 +513,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Used to find all implicit mappings of arrays that must be performed
         bool VisitArraySubscriptExpr(ArraySubscriptExpr *e) {
             if (findMappings) {
-
                 Expr *exp = e->getBase();
                 if (isa<ImplicitCastExpr>(*exp))
                     exp = reinterpret_cast<ImplicitCastExpr*>(exp)->getSubExpr();
@@ -472,8 +540,10 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                 if (!isa<VarDecl>(*(dex->getDecl())))
                     return true;
                 VarDecl *vDecl = reinterpret_cast<VarDecl*>(dex->getDecl());
-                if (rewriter.getSourceMgr().isBeforeInTranslationUnit(startOfTarget,vDecl->getLocStart()))
+                if (rewriter.getSourceMgr().isBeforeInTranslationUnit(startOfTarget,vDecl->getLocStart())) {
+                    checkVarDecl(vDecl->getNameAsString(), dex->getLocEnd());
                     return true;
+                }
                 addMapping(vDecl->getNameAsString(), OMPC_MAP_tofrom, 0, false); 
             }
             return true;

@@ -23,6 +23,7 @@
 #include <sstream>
 #include <iostream>
 #include <queue>
+#include <list>
 #include <forward_list>
 
 #define PRAGMA_SIZE 8
@@ -46,4 +47,9 @@ struct Variable {
 struct Iterator {
     std::string name;
     int maxSize = 0;
+};
+
+struct VariableRange {
+    std::string name;
+    SourceRange range;
 };
