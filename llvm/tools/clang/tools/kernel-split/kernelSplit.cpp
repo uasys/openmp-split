@@ -25,6 +25,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Variables used for calculating all the implicit and explicit shared mappings required for the given code
         std::forward_list<Variable> vars;
         std::forward_list<Iterator> loopIterators;
+        std::forward_list<std::string> targetDataMappings;
         bool findMappings = false;
         SourceLocation startOfTarget;
         
@@ -107,6 +108,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Function called by the visitor before traversing down an OpenMP "target data" directive 
         bool TraverseOMPTargetDataDirective(OMPTargetDataDirective *d) {
             inTargetData = true;
+            targetDataMappings.clear();
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetDataDirective(d);
             inTargetData = false;
             return true;
@@ -123,6 +125,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             mapClauses.str("");
             vars.clear();
             loopIterators.clear();
+            varRanges.clear();
             RecursiveASTVisitor<MyASTVisitor>::TraverseOMPTargetTeamsDirective(d);
             threadLimit = DEFAULT_THREAD_LIMIT;
             inTarget = false;
@@ -132,7 +135,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         
         //Function called by the visitor upon finding an OpenMP "target teams" directive
         bool VisitOMPTargetTeamsDirective(OMPTargetTeamsDirective *d) {
-
+           
             //Finds all clauses for the given directive and saves then for later use
             for (int i = 0; i < (int) d->getNumClauses(); ++i) {
                 OMPClause *c = d->clauses()[i];
@@ -162,10 +165,14 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             //Creates the new map clauses for the target teams area based on the data gathered
             findMappings = true;
             startOfTarget = d->getLocStart();
-            for (StmtIterator iter = d->child_begin(); iter!=d->child_end(); ++iter)
+            for (StmtIterator iter = d->child_begin(); iter!=d->child_end(); ++iter) {
+                std::cout << "CHECKING STMT: " << iter->getStmtClassName() << std::endl;
                 TraverseStmt(*iter);
+            }
             findMappings = false;
             createNewMapClauses();
+
+            std::cout << "CREATED MAPPINGS" << std::endl;
 
             //Calculates the internal blocking for internally defined variables
             auto frntIter = varRanges.begin();
@@ -181,7 +188,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                     frntIter = varIter;
                 varIter++;
             }
- 
+
             //Finds the compound statement holding all the code within brackets
             CompoundStmt *cmpS = reinterpret_cast<CompoundStmt*>(getTopCompoundStmt(d));
             if(!cmpS)
@@ -225,12 +232,20 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                  prevSafe = isSafe;
             }
             
-           //Adds final serial region bracket if needed 
-           if (prevSrl)
+            //Adds final serial region bracket if needed 
+            if (prevSrl)
                 rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
 
             return true;
         }
+         
+
+/*
+bool VisitStmt(Stmt *s) {
+    if (findMappings)
+        std::cout << s->getStmtClassName() << std::endl;
+    return true;
+}*/
 
         //Checks if the given location is within a variable declaration of a target region and so is not safe to put in an independent target region
         bool getLocationSafety(SourceLocation loc) {
@@ -276,7 +291,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
         //Function called by the visitor upon finding an OpenMP "distribute parallel for" directive
         bool VisitOMPDistributeParallelForDirective(OMPDistributeParallelForDirective *d) {
- 
             //Transforms the distribute parallel statmement by adding a target teams if possible for the given directive
             if (inTarget and !searchFor and !findMappings and stmtDepth == 1 and getLocationSafety(d->getLocStart())) {
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
@@ -431,6 +445,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         bool TraverseForStmt(ForStmt *s) {
             bool added = false;
             if (findMappings) {
+                std::cout << "TRAVERSING FOR LOOP" << std::endl;
                 stmtDepth++;
                 Expr *exp = s->getCond();
                 Expr *name;
@@ -510,6 +525,40 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             return 0; 
         }
 
+/*
+        //Ensures any mapping performed by a surround Target Data area is not repeated within the target teams
+        bool VisitOMPTargetDataDirective(OMPTargetDataDirective *d) {
+            for (int i = 0; i < (int) d->getNumClauses(); ++i) {
+                OMPClause *c = d->clauses()[i];
+                if (!c->isImplicit()) {
+                        if (c->getClauseKind() == OMPC_map)
+                            recordMapping(reinterpret_cast<OMPMapClause*>(c));
+                }
+            }
+            return true;
+        }
+
+        //Records all the mappings from the target data clause
+        void recordMapping(OMPMapClause *c) {
+            for (StmtIterator iter = c->children().begin(); iter!=c->children().end(); ++iter) {
+                if (isa<OMPArraySectionExpr>(*iter)) {
+                    OMPArraySectionExpr *ompArray = reinterpret_cast<OMPArraySectionExpr*>(*iter);
+                    Expr *exp = ompArray->getBase();
+                    if (isa<ImplicitCastExpr>(*exp))
+                        exp = reinterpret_cast<ImplicitCastExpr*>(exp)->getSubExpr();
+                    if (!isa<DeclRefExpr>(*exp))
+                        continue;
+                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
+                    targetDataMappings.push_front(vDecl->getNameAsString());
+                }
+                else if (isa<DeclRefExpr>(*iter)) {
+                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(*iter)->getDecl());
+                    targetDataMappings.push_front(vDecl->getNameAsString());
+                }
+            }
+            return;
+        }
+*/
         //Used to find all implicit mappings of arrays that must be performed
         bool VisitArraySubscriptExpr(ArraySubscriptExpr *e) {
             if (findMappings) {
@@ -552,7 +601,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Calculates the variables mapped in the given clause
         void readMapping(OMPMapClause *c) {
             OpenMPMapClauseKind mapKind = c->getMapType();
-
             for (StmtIterator iter = c->children().begin(); iter!=c->children().end(); ++iter) {
                 if (isa<OMPArraySectionExpr>(*iter)) {
                     OMPArraySectionExpr *ompArray = reinterpret_cast<OMPArraySectionExpr*>(*iter);
@@ -569,6 +617,10 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
                         size = length.getExtValue();
                  
                     addMapping(vDecl->getNameAsString(), mapKind, size, true, true);
+                }
+                else if (isa<DeclRefExpr>(*iter)) {
+                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(*iter)->getDecl());
+                    addMapping(vDecl->getNameAsString(), mapKind, 0, false, true);
                 }
             }
             return;
@@ -587,6 +639,15 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
         //Checks the given mem object to see if it is already recorded for mapping and updates map type and size if needed
         bool checkMappings(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray) {
+            if (inTargetData) {
+                auto iter = targetDataMappings.begin();
+                while (iter != targetDataMappings.end()) {
+                    if (*iter == name)
+                        return false;
+                    iter++;
+                }
+            }
+
             auto iter = vars.begin();
             while (iter != vars.end()) {
                 if (iter->name == name) {
