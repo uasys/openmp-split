@@ -28,7 +28,7 @@
 
 #define PRAGMA_SIZE 8
 #define DEFAULT_THREAD_LIMIT 128
-#define DEFAULT_NUM_TEAMS 112
+#define DEFAULT_NUM_TEAMS 128
 #define MAX_BLOCKS 448
 
 using namespace llvm;
@@ -40,6 +40,7 @@ struct Variable {
     std::string name;
     OpenMPMapClauseKind mapKind;
     int size = 0;
+    std::string stringRep;
     bool alreadyMapped = false;
     bool array = true;
 };

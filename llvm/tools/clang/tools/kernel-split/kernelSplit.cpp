@@ -25,7 +25,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
         //Variables used for calculating all the implicit and explicit shared mappings required for the given code
         std::forward_list<Variable> vars;
         std::forward_list<Iterator> loopIterators;
-        std::forward_list<std::string> targetDataMappings;
+        std::forward_list<Variable> targetDataMappings;
         bool findMappings = false;
         SourceLocation startOfTarget;
         
@@ -165,14 +165,9 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             //Creates the new map clauses for the target teams area based on the data gathered
             findMappings = true;
             startOfTarget = d->getLocStart();
-            for (StmtIterator iter = d->child_begin(); iter!=d->child_end(); ++iter) {
-                std::cout << "CHECKING STMT: " << iter->getStmtClassName() << std::endl;
+            for (StmtIterator iter = d->child_begin(); iter!=d->child_end(); ++iter)
                 TraverseStmt(*iter);
-            }
             findMappings = false;
-            createNewMapClauses();
-
-            std::cout << "CREATED MAPPINGS" << std::endl;
 
             //Calculates the internal blocking for internally defined variables
             auto frntIter = varRanges.begin();
@@ -203,12 +198,12 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
             else
                 rewriter.RemoveText(SourceRange(d->getLocStart().getLocWithOffset(-PRAGMA_SIZE),d->getLocEnd()));
 
-            //Adds encompassing target data directive if not within one already
-            if (!inTargetData) {
-                rewriter.InsertText(cmpS->getLBracLoc(), "\n#pragma omp target data "+mapClauses.str()+"\n{\n", true, true);
-                rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
+            //Adds encompassing target data directive for any mapping required
+            if (createNewMapClauses(&mapClauses)) {
+            rewriter.InsertTextAfterToken(cmpS->getLBracLoc(), "\n#pragma omp target data "+mapClauses.str()+"\n{\n");
+            rewriter.InsertText(cmpS->getRBracLoc(), "}\n", true, true);
             }
-
+ 
             //Blocks off the code within, placing serial regions in large target blocks and parallel regions in individual target blocks
             bool prevSrl = false;
             bool prevSafe = true;
@@ -238,14 +233,6 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 
             return true;
         }
-         
-
-/*
-bool VisitStmt(Stmt *s) {
-    if (findMappings)
-        std::cout << s->getStmtClassName() << std::endl;
-    return true;
-}*/
 
         //Checks if the given location is within a variable declaration of a target region and so is not safe to put in an independent target region
         bool getLocationSafety(SourceLocation loc) {
@@ -295,8 +282,6 @@ bool VisitStmt(Stmt *s) {
             if (inTarget and !searchFor and !findMappings and stmtDepth == 1 and getLocationSafety(d->getLocStart())) {
                 rewriter.InsertText(d->getLocStart().getLocWithOffset(4), "target teams ");
                 std::stringstream clauses;
-                if(inTargetData)
-                    clauses << mapClauses.str();
                 clauses << targetClauses.str();
                 if(customGeo)
                     clauses << "num_teams(" << calculateCustomGeo(d) << ")";
@@ -445,10 +430,9 @@ bool VisitStmt(Stmt *s) {
         bool TraverseForStmt(ForStmt *s) {
             bool added = false;
             if (findMappings) {
-                std::cout << "TRAVERSING FOR LOOP" << std::endl;
                 stmtDepth++;
                 Expr *exp = s->getCond();
-                Expr *name;
+                Expr *name = NULL;
                 APSInt maxSize;
                 bool isEquals = false;
                 if (isa<BinaryOperator>(*exp)) {
@@ -460,7 +444,6 @@ bool VisitStmt(Stmt *s) {
                     if (op->getOpcode() == BO_LE or op->getOpcode() == BO_GE or op->getOpcode() == BO_EQ)
                         isEquals = true;
                 }
-
                 if (name) {
                     if (isa<ImplicitCastExpr>(*name))
                         name = reinterpret_cast<ImplicitCastExpr*>(name)->getSubExpr();
@@ -525,40 +508,18 @@ bool VisitStmt(Stmt *s) {
             return 0; 
         }
 
-/*
         //Ensures any mapping performed by a surround Target Data area is not repeated within the target teams
         bool VisitOMPTargetDataDirective(OMPTargetDataDirective *d) {
             for (int i = 0; i < (int) d->getNumClauses(); ++i) {
                 OMPClause *c = d->clauses()[i];
                 if (!c->isImplicit()) {
                         if (c->getClauseKind() == OMPC_map)
-                            recordMapping(reinterpret_cast<OMPMapClause*>(c));
+                            readMapping(reinterpret_cast<OMPMapClause*>(c), true);
                 }
             }
             return true;
         }
 
-        //Records all the mappings from the target data clause
-        void recordMapping(OMPMapClause *c) {
-            for (StmtIterator iter = c->children().begin(); iter!=c->children().end(); ++iter) {
-                if (isa<OMPArraySectionExpr>(*iter)) {
-                    OMPArraySectionExpr *ompArray = reinterpret_cast<OMPArraySectionExpr*>(*iter);
-                    Expr *exp = ompArray->getBase();
-                    if (isa<ImplicitCastExpr>(*exp))
-                        exp = reinterpret_cast<ImplicitCastExpr*>(exp)->getSubExpr();
-                    if (!isa<DeclRefExpr>(*exp))
-                        continue;
-                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(exp)->getDecl());
-                    targetDataMappings.push_front(vDecl->getNameAsString());
-                }
-                else if (isa<DeclRefExpr>(*iter)) {
-                    VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(*iter)->getDecl());
-                    targetDataMappings.push_front(vDecl->getNameAsString());
-                }
-            }
-            return;
-        }
-*/
         //Used to find all implicit mappings of arrays that must be performed
         bool VisitArraySubscriptExpr(ArraySubscriptExpr *e) {
             if (findMappings) {
@@ -599,7 +560,7 @@ bool VisitStmt(Stmt *s) {
         }
 
         //Calculates the variables mapped in the given clause
-        void readMapping(OMPMapClause *c) {
+        void readMapping(OMPMapClause *c, bool forTargetData=false) {
             OpenMPMapClauseKind mapKind = c->getMapType();
             for (StmtIterator iter = c->children().begin(); iter!=c->children().end(); ++iter) {
                 if (isa<OMPArraySectionExpr>(*iter)) {
@@ -613,63 +574,89 @@ bool VisitStmt(Stmt *s) {
 
                     APSInt length;
                     int size = -1;
-                    if (ompArray->getLength()->EvaluateAsInt(length,context))
+                    Expr *arrayLength = ompArray->getLength();
+                    if (arrayLength->EvaluateAsInt(length,context))
                         size = length.getExtValue();
-                 
-                    addMapping(vDecl->getNameAsString(), mapKind, size, true, true);
+                    std::string indexStr = rewriter.getRewrittenText(arrayLength->getSourceRange());
+
+                    addMapping(vDecl->getNameAsString(), mapKind, size, true, true, forTargetData, indexStr);
                 }
                 else if (isa<DeclRefExpr>(*iter)) {
                     VarDecl *vDecl = reinterpret_cast<VarDecl*>(reinterpret_cast<DeclRefExpr*>(*iter)->getDecl());
-                    addMapping(vDecl->getNameAsString(), mapKind, 0, false, true);
+                    addMapping(vDecl->getNameAsString(), mapKind, 0, false, true, forTargetData);
                 }
             }
             return;
         }
 
         //Adds the given mem object to the list of those to be mapped
-        bool addMapping(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray, bool inExistingMap=false) {
-            if (checkMappings(name, mapKind, size, isArray) and size != -1) {
+        bool addMapping(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray, bool inExistingMap=false, bool forTargetData=false, std::string indexStr="") {
+            if (checkMappings(name, mapKind, size, isArray, forTargetData)) {
                 Variable newVar;
-                newVar.name = name, newVar.mapKind = mapKind, newVar.size = size, newVar.array = isArray, newVar.alreadyMapped = inExistingMap;
-                vars.push_front(newVar);
+                newVar.name = name, newVar.mapKind = mapKind, newVar.size = size, newVar.stringRep = indexStr, newVar.array = isArray, newVar.alreadyMapped = inExistingMap;
+                if (forTargetData)
+                    targetDataMappings.push_front(newVar);
+                else
+                    vars.push_front(newVar);
                 return true;
             }
             return false;
         }
 
         //Checks the given mem object to see if it is already recorded for mapping and updates map type and size if needed
-        bool checkMappings(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray) {
-            if (inTargetData) {
-                auto iter = targetDataMappings.begin();
-                while (iter != targetDataMappings.end()) {
-                    if (*iter == name)
+        bool checkMappings(std::string name, OpenMPMapClauseKind mapKind, int size, bool isArray, bool forTargetData=false) {
+            if (!forTargetData) {
+                if (inTargetData) {
+                    auto iter = targetDataMappings.begin();
+                    while (iter != targetDataMappings.end()) {
+                        if (iter->name == name)
+                            return false;
+                        iter++;
+                    }
+                }
+                auto iter = vars.begin();
+                while (iter != vars.end()) {
+                    if (iter->name == name) {
+                        if (iter->size < size and size != -1)
+                            iter->size = size;
+                        if (!iter->alreadyMapped) {
+                            if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
+                                iter->mapKind = mapKind;
+                            else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
+                                iter->mapKind = OMPC_MAP_tofrom;
+                        }
+                        if(isArray)
+                            iter->array = isArray;
                         return false;
-                    iter++;
+                    }
+                    ++iter; 
                 }
             }
-
-            auto iter = vars.begin();
-            while (iter != vars.end()) {
-                if (iter->name == name) {
-                    if (iter->size < size)
-                        iter->size = size;
-                    if (!iter->alreadyMapped) {
-                        if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
-                            iter->mapKind = mapKind;
-                        else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
-                            iter->mapKind = OMPC_MAP_tofrom;
+            else {
+                auto iter = targetDataMappings.begin();
+                while (iter != targetDataMappings.end()) {
+                    if (iter->name == name) {
+                        if (iter->size < size and size != -1)
+                            iter->size = size;
+                        if (!iter->alreadyMapped) {
+                            if (iter->mapKind < mapKind and !(iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to))
+                                iter->mapKind = mapKind;
+                            else if (iter->mapKind == OMPC_MAP_from and mapKind == OMPC_MAP_to)
+                                iter->mapKind = OMPC_MAP_tofrom;
+                        }
+                        if(isArray)
+                            iter->array = isArray;
+                        return false;
                     }
-                    if(isArray)
-                        iter->array = isArray;
-                    return false;
+                    ++iter; 
                 }
-                ++iter; 
             }
             return true;
         }
 
         //Creates the resulting map clauses for the target region based on the analysis of the target region
-        void createNewMapClauses() {
+        bool createNewMapClauses(std::stringstream *clauses) {
+            bool mappingCreated = false;
             int alloc = 0, to = 0, from = 0, tofrom = 0;
             std::stringstream a, t, f, tf, temp;
             a << "map(alloc :";
@@ -681,10 +668,17 @@ bool VisitStmt(Stmt *s) {
             while (iter != vars.end()) {
                 temp.str("");
                 if (iter->array) {
+                    mappingCreated = true;
                     temp << "[:"; 
                     if (iter->size != -1)
                         temp << iter->size;
+                    else
+                        temp << iter->stringRep;
                     temp << "]";
+                }
+                else {
+                    ++iter;
+                    continue;
                 }
                 switch(iter->mapKind) {
                     case OMPC_MAP_alloc:  
@@ -716,14 +710,14 @@ bool VisitStmt(Stmt *s) {
                 ++iter;
             }
             if (alloc)
-                mapClauses << a.str() << ") ";
+                *clauses << a.str() << ") ";
             if (to)
-                mapClauses << t.str() << ") ";
+                *clauses << t.str() << ") ";
             if (from)
-                mapClauses << f.str() << ") ";
+                *clauses << f.str() << ") ";
             if (tofrom)
-                mapClauses << tf.str() << ") ";
-            return;
+                *clauses << tf.str() << ") ";
+            return mappingCreated;
         }        
 };
 
