@@ -12,6 +12,12 @@ import math
 #number of iterations to run all tests on
 iterations = 10
 
+#The main compile command used
+compileCommand = "clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda" 
+
+#Instructions to link the cuda libraries
+cudaLibrary = "-lcudart -I/usr/local/cuda/include/"
+
 #The function that intitiates each benchmark run and reads the run time results for printing
 def run_command(command):
     os.system(command)
@@ -40,7 +46,10 @@ def run_command(command):
 def main():
     n = str(sys.argv[1])
     size = str(sys.argv[2])
-    exst = str(sys.argv[3])
+    if len(sys.argv) > 3:
+        exst = str(sys.argv[3])
+    else:
+        exst = ""
 
     #Adds all tested files to the list for testing, with a related boolean value to ensure
     #that any cuda code is also handled for asynchronous tests
@@ -69,9 +78,9 @@ def main():
     for name in versions:
         #Chooses the correct compilation command in case of cuda code being present
         if (usesLibrary[version]):
-            os.system("clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda -lcudart -I/usr/local/cuda/include/ -DSIZE="+size+" "+n.upper()+exst+"/"+name)
+            os.system(compileCommand+" "+cudaLibrary+" -DSIZE="+size+" "+n.upper()+exst+"/"+name)
         else:
-            os.system("clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda -DSIZE="+size+" "+n.upper()+exst+"/"+name)
+            os.system(compileCommand+" -DSIZE="+size+" "+n.upper()+exst+"/"+name)
 
         #Establish all variables to run the iterations
         times = list()

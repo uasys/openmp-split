@@ -10,6 +10,12 @@ import math
 #Number of iterations to run all tests on
 iterations = 10
 
+#The main compile command used
+compileCommand = "clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda" 
+
+#Instructions to link the cuda libraries
+cudaLibrary = "-lcudart -I/usr/local/cuda/include/"
+
 #Additional arguments for specific benchmarks that require them
 sradCompileArgs = "-lm"
 sradRunArgs = "0.5 512 512 4"		#Change "512 512" to dimensions of image used
@@ -86,9 +92,9 @@ def main():
     for name in versions:
         #Chooses the correct compilation command in case of cuda code being present
         if (usesLibrary[version]):
-            os.system("clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda -lcudart -I/usr/local/cuda/include/ "+compileArgs+" -DSIZE="+size+" "+n.upper()+"/"+name)
+            os.system(compileCommand+" "+cudaLibrary+" "+compileArgs+" -DSIZE="+size+" "+n.upper()+"/"+name)
         else:
-            os.system("clang -O3 -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda "+compileArgs+" -DSIZE="+size+" "+n.upper()+"/"+name)
+            os.system(compileCommand+" "+compileArgs+" -DSIZE="+size+" "+n.upper()+"/"+name)
 
         #Establish all variables to run the iterations
         times = list()
